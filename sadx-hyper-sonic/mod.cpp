@@ -103,7 +103,7 @@ void __cdecl Sonic_Act1_r(EntityData1* data, EntityData2* data2, CharObj2* co2) 
 					LoadPVM("HYPERSONIC_V_DC", &SUPERSONIC_TEXLIST);
 				}
 
-				if (DCChars == true && HyperSkinDC_int == SSVibrant) {
+				if (DCChars == true && HyperSkinDC_int == SSVibrantP) {
 					njReleaseTexture(&SUPERSONIC_TEXLIST);
 					LoadPVM("HYPERSONIC_V_P_DC", &SUPERSONIC_TEXLIST);
 				}
