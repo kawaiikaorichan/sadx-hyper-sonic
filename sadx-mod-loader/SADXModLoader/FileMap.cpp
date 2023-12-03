@@ -7,10 +7,9 @@
 #include "FileMap.hpp"
 
 #include <cctype>
-#include <cstring>
 #include <algorithm>
 #include "TextureReplacement.h"
-#include "pvmx.h"
+#include "VoiceDuration.h"
 
 using std::list;
 using std::string;
@@ -21,23 +20,14 @@ using std::unordered_map;
 #include <Windows.h>
 #include <Shlwapi.h>
 
-FileMap::FileMap()
-{ }
-
-FileMap::~FileMap()
-{ }
-
 /**
  * Replace slash characters with backslashes.
  * @param c Character.
  * @return If c == '/', '\\'; otherwise, c.
  */
-static inline int backslashes(int c)
+inline int backslashes(int c)
 {
-	if (c == '/')
-		return '\\';
-	else
-		return c;
+	return c == '/' ? '\\' : c;
 }
 
 /**
@@ -45,7 +35,7 @@ static inline int backslashes(int c)
  * @param filename Filename.
  * @return Normalized filename.
  */
-string FileMap::normalizePath(const string &filename)
+string FileMap::normalizePath(const string& filename)
 {
 	return normalizePath(filename.c_str());
 }
@@ -55,7 +45,7 @@ string FileMap::normalizePath(const string &filename)
  * @param filename Filename.
  * @return Normalized filename.
  */
-string FileMap::normalizePath(const char *filename)
+string FileMap::normalizePath(const char* filename)
 {
 	string path = filename;
 	transform(path.begin(), path.end(), path.begin(), backslashes);
@@ -65,12 +55,40 @@ string FileMap::normalizePath(const char *filename)
 	return path;
 }
 
+void FileMap::EditVoiceDuration(std::string modFile, bool isJp)
+{
+
+	const int ms = GetSoundLength(modFile);
+	int voiceID = 0;
+
+	if (ms)
+	{	
+		std::string newID = base_name(modFile);
+
+		if (isInteger(newID))
+		{
+			voiceID = std::stoi(newID);
+
+			if (isJp)
+			{
+				if (voiceID >= 0)
+					RegisterJapaneseVoiceDuration(voiceID, ms);
+			}
+			else
+			{
+				if (voiceID >= 0)
+					RegisterEnglishVoiceDuration(voiceID, ms);
+			}
+		}
+	}
+}
+
 /**
  * Ignore a file.
  * @param ignoreFile File to ignore.
  * @param modIdx Index of the current mod.
  */
-void FileMap::addIgnoreFile(const string &ignoreFile, int modIdx)
+void FileMap::addIgnoreFile(const string& ignoreFile, int modIdx)
 {
 	string path = normalizePath(ignoreFile);
 	m_fileMap[path] = { "nullfile", modIdx };
@@ -80,15 +98,16 @@ void FileMap::addIgnoreFile(const string &ignoreFile, int modIdx)
  * Add a file replacement.
  * @param origFile Original filename.
  * @param modFile Mod filename.
+ * @param force Do not check if the destination file is being replaced.
  */
-void FileMap::addReplaceFile(const std::string &origFile, const std::string &modFile)
+void FileMap::addReplaceFile(const std::string& origFile, const std::string& modFile, bool force)
 {
 	string origFile_norm = normalizePath(origFile);
 	string modFile_norm = normalizePath(modFile);
 
 	// Check if the destination file is being replaced.
 	auto iter = m_fileMap.find(modFile_norm);
-	if (iter != m_fileMap.end())
+	if (!force && iter != m_fileMap.end())
 	{
 		// Destination file is being replaced.
 		// Use the replacement for the original file.
@@ -106,7 +125,7 @@ void FileMap::addReplaceFile(const std::string &origFile, const std::string &mod
 * @param fileA First filename.
 * @param fileB Second filename.
 */
-void FileMap::swapFiles(const std::string &fileA, const std::string &fileB)
+void FileMap::swapFiles(const std::string& fileA, const std::string& fileB)
 {
 	string fileA_norm = normalizePath(fileA);
 	string fileB_norm = normalizePath(fileB);
@@ -144,7 +163,7 @@ void FileMap::swapFiles(const std::string &fileA, const std::string &fileB)
  * @param srcPath Path to scan.
  * @param modIdx Index of the current mod.
  */
-void FileMap::scanFolder(const string &srcPath, int modIdx)
+void FileMap::scanFolder(const string& srcPath, int modIdx)
 {
 	scanFolder_int(srcPath, srcPath.length() + 1, modIdx);
 }
@@ -157,7 +176,7 @@ void FileMap::scanFolder(const string &srcPath, int modIdx)
  * @param srcLen Length of original srcPath. (used for recursion)
  * @param modIdx Index of the current mod.
  */
-void FileMap::scanFolder_int(const string &srcPath, int srcLen, int modIdx)
+void FileMap::scanFolder_int(const string& srcPath, int srcLen, int modIdx)
 {
 	WIN32_FIND_DATAA data;
 	char path[MAX_PATH];
@@ -185,25 +204,48 @@ void FileMap::scanFolder_int(const string &srcPath, int srcLen, int modIdx)
 			// Recursively scan this directory.
 			const string newSrcPath = srcPath + '\\' + string(data.cFileName);
 			scanFolder_int(newSrcPath, srcLen, modIdx);
+			continue;
 		}
-		else
+
+		// Create the mod filename and original filename.
+		string modFile = srcPath + '\\' + string(data.cFileName);
+		transform(modFile.begin(), modFile.end(), modFile.begin(), ::tolower);
+
+		// Original filename.
+		string origFile = "system\\" + modFile.substr(srcLen);
+		bool isEng = !origFile.compare(0, 30, "system\\sounddata\\voice_us\\wma\\");
+		bool isJP = !origFile.compare(0, 30, "system\\sounddata\\voice_jp\\wma\\");
+
+		if (!origFile.compare(0, 25, "system\\sounddata\\bgm\\wma\\") ||
+			isEng ||
+			isJP)
 		{
-			// Create the mod filename and original filename.
-			string modFile = srcPath + '\\' + string(data.cFileName);
-			transform(modFile.begin(), modFile.end(), modFile.begin(), ::tolower);
+			// Original filename should have a ".wma" extension.
+			ReplaceFileExtension(origFile, ".wma");
 
-			// Original filename.
-			string origFile = "system\\" + modFile.substr(srcLen);
-
-			if (!origFile.compare(0, 25, "system\\sounddata\\bgm\\wma\\") ||
-			    !origFile.compare(0, 30, "system\\sounddata\\voice_us\\wma\\") ||
-			    !origFile.compare(0, 30, "system\\sounddata\\voice_jp\\wma\\"))
+			if (GetExtension(modFile) == "wav")
 			{
-				// Original filename should have a ".wma" extension.
-				ReplaceFileExtension(origFile, ".wma");
+				if (isEng || isJP)
+				{
+					EditVoiceDuration(modFile, isJP);							
+				}
 			}
-			setReplaceFile(origFile, modFile, modIdx);
 		}
+		else if (GetExtension(modFile) == "prs")
+		{
+			string realFile = modFile;
+			StripExtension(realFile);
+
+			auto ext = GetExtension(realFile);
+
+			// Right now, PRS support is limited to PVM and PVR files.
+			if (!ext.empty() && (ext == "pvm" || ext == "pvr"))
+			{
+				StripExtension(origFile);
+			}
+		}
+
+		setReplaceFile(origFile, modFile, modIdx);
 	} while (FindNextFileA(hFind, &data) != 0);
 
 	FindClose(hFind);
@@ -213,7 +255,7 @@ void FileMap::scanFolder_int(const string &srcPath, int srcLen, int modIdx)
 * Scans a sound folder for non-WMA files.
 * @param srcPath Path to scan.
 */
-void FileMap::scanSoundFolder(const std::string &srcPath)
+void FileMap::scanSoundFolder(const std::string& srcPath)
 {
 	WIN32_FIND_DATAA data;
 	char path[MAX_PATH];
@@ -237,7 +279,7 @@ void FileMap::scanSoundFolder(const std::string &srcPath)
 		}
 
 		if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-			_stricmp(".wma", PathFindExtensionA(data.cFileName)))
+			!!_stricmp(".wma", PathFindExtensionA(data.cFileName)))
 		{
 			// Create the mod filename and original filename.
 			string modFile = srcPath + '\\' + string(data.cFileName);
@@ -245,7 +287,7 @@ void FileMap::scanSoundFolder(const std::string &srcPath)
 			// Original filename should have a ".wma" extension.
 			string origFile = modFile;
 			ReplaceFileExtension(origFile, ".wma");
-			m_fileMap[origFile] = { modFile };
+			m_fileMap[origFile] = { modFile, 0 };
 		}
 	} while (FindNextFileA(hFind, &data) != 0);
 
@@ -300,7 +342,7 @@ void FileMap::scanTextureFolder(const string& srcPath, int modIndex)
 			continue;
 		}
 
-		string fileName = string(data.cFileName);
+		const string fileName = string(data.cFileName);
 
 		if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
 		{
@@ -335,10 +377,9 @@ void FileMap::scanTextureFolder(const string& srcPath, int modIndex)
 
 			string texPack = srcPath + '\\' + fileName;
 			transform(texPack.begin(), texPack.end(), texPack.begin(), ::tolower);
-			
+
 			m_fileMap[original] = { texPack, modIndex };
 		}
-
 	} while (FindNextFileA(hFind, &data) != 0);
 
 	FindClose(hFind);
@@ -352,7 +393,7 @@ void FileMap::scanTextureFolder(const string& srcPath, int modIndex)
  * @param destFile Replacement filename.
  * @param modIdx Index of the current mod.
  */
-void FileMap::setReplaceFile(const std::string &origFile, const std::string &destFile, int modIdx)
+void FileMap::setReplaceFile(const std::string& origFile, const std::string& destFile, int modIdx)
 {
 	// Update the main map.
 	m_fileMap[origFile] = { destFile, modIdx };
@@ -367,14 +408,14 @@ void FileMap::setReplaceFile(const std::string &origFile, const std::string &des
  * @param lpFileName Filename.
  * @return Replaced filename, or original filename if not replaced by a mod.
  */
-const char *FileMap::replaceFile(const char *lpFileName) const
+const char* FileMap::replaceFile(const char* lpFileName) const
 {
 	// Check if the normalized filename is in the file replacement map.
 	string path = normalizePath(lpFileName);
-	unordered_map<string, Entry>::const_iterator iter = m_fileMap.find(path);
+	auto iter = m_fileMap.find(path);
 	if (iter != m_fileMap.cend())
 	{
-		const string &newFileName = iter->second.fileName;
+		const string& newFileName = iter->second.fileName;
 		return newFileName.c_str();
 	}
 
@@ -388,11 +429,11 @@ const char *FileMap::replaceFile(const char *lpFileName) const
  * @param lpFileName Filename.
  * @return Index of the mod that replaced a file, or 0 if no mod replaced it.
  */
-int FileMap::getModIndex(const char *lpFileName) const
+int FileMap::getModIndex(const char* lpFileName) const
 {
 	// Check if the normalized filename is in the file replacement map.
 	string path = normalizePath(lpFileName);
-	unordered_map<string, Entry>::const_iterator iter = m_fileMap.find(path);
+	auto iter = m_fileMap.find(path);
 	if (iter != m_fileMap.cend())
 	{
 		return iter->second.modIndex;
@@ -405,7 +446,7 @@ int FileMap::getModIndex(const char *lpFileName) const
 /**
  * Clear the file replacement map.
  */
-void FileMap::clear(void)
+void FileMap::clear()
 {
 	m_fileMap.clear();
 }

@@ -27,6 +27,12 @@
     <ClInclude Include="TextConv.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="HSDCtexlist.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="hypersonic.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">

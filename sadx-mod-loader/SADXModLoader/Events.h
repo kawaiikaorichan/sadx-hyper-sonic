@@ -5,6 +5,7 @@
 
 using TextureLoadEvent = void(__cdecl *)(NJS_TEXMEMLIST*, const char*, Uint32);
 
+extern std::vector<ModEvent> modInitEndEvents;
 extern std::vector<ModEvent> modFrameEvents;
 extern std::vector<ModEvent> modInputEvents;
 extern std::vector<ModEvent> modControlEvents;
@@ -12,6 +13,8 @@ extern std::vector<ModEvent> modExitEvents;
 extern std::vector<TextureLoadEvent> modCustomTextureLoadEvents;
 extern std::vector<ModEvent> modRenderDeviceLost;
 extern std::vector<ModEvent> modRenderDeviceReset;
+extern std::vector<ModEvent> onRenderSceneEnd;
+extern std::vector<ModEvent> onRenderSceneStart;
 
 /**
 * Calls all registered events in the specified event list.

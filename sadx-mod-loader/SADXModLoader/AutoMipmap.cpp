@@ -5,7 +5,7 @@
 #include "Trampoline.h"
 
 #include "AutoMipmap.h"
-#include "D3DCommon.h"
+#include "direct3d.h"
 
 using namespace std;
 
@@ -615,7 +615,7 @@ namespace mipmap
 	};
 
 	// Blacklisted global indexes.
-	static unordered_set<Uint32> gbix_blacklist;
+	static unordered_set<Uint32> gbix_blacklist = {199990}; //Chao message text
 
 	static bool blacklisted = false;
 	static bool enabled = false;

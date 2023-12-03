@@ -1,17 +1,12 @@
 #include "SADXModLoader.h"
 #include "stdafx.h"
+#include "HSDCtexlist.h"
+#include "hypersonic.h"
 
 HelperFunctions helperFunctionsGlobal;
 #define ReplacePVM(a, b) helperFunctionsGlobal.ReplaceFile("system\\" a ".PVM", "system\\" b ".PVM");
 
 static constexpr int max_players = 8;
-
-enum HyperSkinDC { ZephP, ZephG, SSVibrant, SSVibrantP };
-enum HyperSkinDX { ZephP_DX, ZephG_DX };
-
-static int  HyperSkinDC_int = ZephP;
-static int  HyperSkinDX_int = ZephP_DX;
-
 static bool DCChars = false;
 
 //DataPointer(char, byte_3B2A2FA, 0x3B2A2FA);
@@ -73,41 +68,24 @@ void __cdecl Sonic_Act1_r(EntityData1* data, EntityData2* data2, CharObj2* co2) 
 		}
 	}
 	else {
-		if (data->Status & Status_DoNextAction && data->NextAction == 46) {
-			njReleaseTexture(&SUPERSONIC_TEXLIST);
-
-			if (CountEmblems(&SaveFile) >= 130 && (Rings >=100 || LastStoryFlag ==1)){
+		if (data->Status & Status_DoNextAction && data->NextAction == 46)
+		{
+			njReleaseTexture(&Hypersonic_TEXLIST);
+			njReleaseTexture(&Hypersonicdc_TEXLIST);
+			if (CountEmblems(&SaveFile) >= 130 && (Rings >=100 || LastStoryFlag ==1))
+			{
 				HyperSonic[id] = true;
 
-				//DX Skins
-				if (HyperSkinDX_int == ZephP_DX) {
-					njReleaseTexture(&SUPERSONIC_TEXLIST);
-					LoadPVM("HYPERSONIC", &SUPERSONIC_TEXLIST);
+				if (DCChars == true)
+				{
+					helperFunctionsGlobal.RegisterCharacterPVM(Characters_Sonic, { "HYPERSONIC_DC", &Hypersonicdc_TEXLIST });
+					LoadPVM("HYPERSONIC_DC", &Hypersonicdc_TEXLIST);
 				}
-				if (HyperSkinDX_int == ZephG_DX) {
-					njReleaseTexture(&SUPERSONIC_TEXLIST);
-					LoadPVM("HYPERSONIC_G", &SUPERSONIC_TEXLIST);
+				else
+				{
+					helperFunctionsGlobal.RegisterCharacterPVM(Characters_Sonic, { "HYPERSONIC", &Hypersonic_TEXLIST });
+					LoadPVM("HYPERSONIC", &Hypersonic_TEXLIST);
 				}
-
-				//Dreamcast Skins
-				if (DCChars == true && HyperSkinDC_int == ZephP) {
-					njReleaseTexture(&SUPERSONIC_TEXLIST);
-					LoadPVM("HYPERSONIC_DC", &SUPERSONIC_TEXLIST);
-				}
-				if (DCChars == true && HyperSkinDC_int == ZephG) {
-					njReleaseTexture(&SUPERSONIC_TEXLIST);
-					LoadPVM("HYPERSONIC_G_DC", &SUPERSONIC_TEXLIST);
-				}
-				if (DCChars == true && HyperSkinDC_int == SSVibrant) {
-					njReleaseTexture(&SUPERSONIC_TEXLIST);
-					LoadPVM("HYPERSONIC_V_DC", &SUPERSONIC_TEXLIST);
-				}
-
-				if (DCChars == true && HyperSkinDC_int == SSVibrantP) {
-					njReleaseTexture(&SUPERSONIC_TEXLIST);
-					LoadPVM("HYPERSONIC_V_P_DC", &SUPERSONIC_TEXLIST);
-				}
-
 
 				InvincibilityObject[id] = LoadObject(LoadObj_Data1, 2, Invincibility_Load);
 				InvincibilityObject[id]->Data1->CharIndex = id;
@@ -126,22 +104,8 @@ void __cdecl Sonic_Act1_r(EntityData1* data, EntityData2* data2, CharObj2* co2) 
 	((decltype(Sonic_Act1_r)*)Sonic_Act1_t.Target())(data, data2, co2); // call original function
 }
 
-//void swapSS()
-//{
-	//SetDefaultAlphaBlend();
-
-	//if ((CountEmblems(&SaveFile) >= 130))
-	//{
-	//	ReplacePVM("M_CHNAM", "M_CHNAM_hyper");
-	//	ReplacePVM("B_CHNAM_E", "B_CHNAM_E_hyper");
-	//	ReplacePVM("B_CHNAM", "B_CHNAM_hyper");
-	//}
-//}
-
 extern "C"
 {
-	__declspec(dllexport) ModInfo SADXModInfo = { ModLoaderVer, nullptr, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0 };
-
 	__declspec(dllexport) void __cdecl Init(const char* path, const HelperFunctions &helperFunctions)
 	{
 		helperFunctionsGlobal = helperFunctions;
@@ -149,28 +113,23 @@ extern "C"
 		//Ini Configuration
 		const IniFile* config = new IniFile(std::string(path) + "\\config.ini");
 
-		std::string HyperSonicDC_String = "ZephP";
-		HyperSonicDC_String = config->getString("Skins", "HyperSkinDC_int", "ZephP");
-
-		std::string HyperSonicDX_String = "ZephP_DX";
-		HyperSonicDX_String = config->getString("Skins", "HyperSkinDX_int", "ZephP_DX");
-
-		if (HyperSonicDC_String == "ZephP") HyperSkinDC_int = ZephP;
-		if (HyperSonicDC_String == "ZephG") HyperSkinDC_int = ZephG;
-		if (HyperSonicDC_String == "SSVibrant") HyperSkinDC_int = SSVibrant;
-		if (HyperSonicDC_String == "SSVibrantP") HyperSkinDC_int = SSVibrant;
-
-		if (HyperSonicDX_String == "ZephP_DX") HyperSkinDX_int = ZephP_DX;
-		if (HyperSonicDX_String == "ZephG_DX") HyperSkinDX_int = ZephG_DX;
-
-		delete config;
-
-		//WriteCall((void*)0x00512460, (void*)swapSS);
+		WriteData((NJS_TEXLIST**)0x55E65C, SSAura01);
+		WriteData((NJS_TEXLIST**)0x55E751, SSAura01);
+		WriteData((NJS_TEXLIST**)0x55E712, SSAura02);
+		WriteData((NJS_TEXLIST**)0x55E7CD, SSWaterThing);
+		WriteData((NJS_TEXLIST**)0x55F2B3, SSHomingTex1);
+		WriteData((NJS_TEXLIST**)0x55F1D1, SSHomingTex1);
+		WriteData((NJS_TEXLIST**)0x55F1DC, SSHomingTex2);
+		WriteData((NJS_TEXLIST**)0x55F2BE, SSHomingTex2);
+		WriteData((NJS_TEXLIST**)0x55F677, SSHomingTex2);
+		WriteData((NJS_TEXLIST**)0x55F669, SSHomingTex3);
+		SUPERSONIC_TEXLIST = SS_PVM;
 	}
 	
 	void __declspec(dllexport) OnInitEnd(const char* path, HelperFunctions* helper)
 	{
 		DCChars = GetModuleHandle(L"SA1_Chars") != NULL;
 	}
-
+	
+	__declspec(dllexport) ModInfo SADXModInfo = { ModLoaderVer, nullptr, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0 };
 }

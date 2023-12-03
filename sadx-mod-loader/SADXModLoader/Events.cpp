@@ -1,35 +1,43 @@
 #include "stdafx.h"
 #include "Trampoline.h"
 #include "Events.h"
+#include "input.h"
+#include "jvList.h"
 
-std::vector<ModEvent> modFrameEvents;
-std::vector<ModEvent> modInputEvents;
-std::vector<ModEvent> modControlEvents;
-std::vector<ModEvent> modExitEvents;
+std::vector<ModEvent>         modInitEndEvents;
+std::vector<ModEvent>         modFrameEvents;
+std::vector<ModEvent>         modInputEvents;
+std::vector<ModEvent>         modControlEvents;
+std::vector<ModEvent>         modExitEvents;
 std::vector<TextureLoadEvent> modCustomTextureLoadEvents;
-std::vector<ModEvent> modRenderDeviceLost;
-std::vector<ModEvent> modRenderDeviceReset;
+std::vector<ModEvent>         modRenderDeviceLost;
+std::vector<ModEvent>         modRenderDeviceReset;
+std::vector<ModEvent>         onRenderSceneEnd;
+std::vector<ModEvent>         onRenderSceneStart;
 
-Trampoline exitDetour((size_t)0x0064672F, 0x00646736, OnExit);
+Trampoline exitDetour(0x0064672F, 0x00646736, OnExit);
 
 /**
-* Registers an event to the specified event list.
-* @param eventList The event list to add to.
-* @param module The module for the mod DLL.
-* @param name The name of the exported function from the module (i.e OnFrame)
-*/
+ * Registers an event to the specified event list.
+ * @param eventList The event list to add to.
+ * @param module The module for the mod DLL.
+ * @param name The name of the exported function from the module (i.e OnFrame)
+ */
 void RegisterEvent(std::vector<ModEvent>& eventList, HMODULE module, const char* name)
 {
-	const ModEvent modEvent = (const ModEvent)GetProcAddress(module, name);
+	const auto modEvent = reinterpret_cast<const ModEvent>(GetProcAddress(module, name));
 
 	if (modEvent != nullptr)
+	{
 		eventList.push_back(modEvent);
+	}
 }
 
 DataPointer(short, word_3B2C464, 0x3B2C464);
 
 void OnInput()
 {
+	SDL2_OnInput();
 	RaiseEvents(modInputEvents);
 }
 
@@ -51,6 +59,8 @@ void OnControl()
 void __cdecl OnExit(UINT uExitCode, int a1, int a2)
 {
 	RaiseEvents(modExitEvents);
+	SDL2_OnExit();
+	FreeJVListIndices();
 	NonStaticFunctionPointer(void, original, (UINT, int, int), exitDetour.Target());
 	original(uExitCode, a1, a2);
 }

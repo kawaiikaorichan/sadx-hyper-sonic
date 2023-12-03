@@ -30,7 +30,7 @@ namespace ModManagerCommon
 						string line = sr.ReadLine().Trim(' ', '\t');
 						if (line.Length == 0) continue;
 						if (line.StartsWith(";")) continue;
-						string[] split = line.Split(' ');
+						string[] split = line.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
 						Code code = null;
 						switch (split[0])
 						{
@@ -419,6 +419,9 @@ namespace ModManagerCommon
 		or8, or16, or32,
 		xor8, xor16, xor32,
 		writenop,
+		writejump,
+		writecall,
+		writeoff,
 		ifeq8, ifeq16, ifeq32, ifeqfloat,
 		ifne8, ifne16, ifne32, ifnefloat,
 		ifltu8, ifltu16, ifltu32, ifltfloat,

@@ -84,7 +84,7 @@ namespace ModManagerCommon.Forms
 								OnDownloadProgress(this, downloadArgs);
 								if (downloadArgs.Cancel)
 								{
-									((WebClient)sender).CancelAsync();
+									client.CancelAsync();
 								}
 							}
 
@@ -128,7 +128,7 @@ namespace ModManagerCommon.Forms
 								return;
 							}
 
-							Process.Start(new ProcessStartInfo("7za.exe", $"x -aoa -o\"{dataDir}\" \"{filePath}\"") { UseShellExecute = false, CreateNoWindow = true }).WaitForExit();
+							Process.Start(new ProcessStartInfo("7z.exe", $"x -aoa -o\"{dataDir}\" \"{filePath}\"") { UseShellExecute = false, CreateNoWindow = true }).WaitForExit();
 
 							Process.Start(Path.Combine(dataDir, Path.GetFileName(Application.ExecutablePath)), $"doupdate \"{dataDir}\"");
 						}, token))

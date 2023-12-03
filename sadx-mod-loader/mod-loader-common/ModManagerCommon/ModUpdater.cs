@@ -1,11 +1,12 @@
-using IniFile;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
+using IniFile;
+using Newtonsoft.Json;
 
 namespace ModManagerCommon
 {
@@ -14,16 +15,44 @@ namespace ModManagerCommon
 		private readonly Dictionary<string, List<GitHubRelease>> gitHubCache = new Dictionary<string, List<GitHubRelease>>();
 		public bool ForceUpdate;
 
-		public ModDownload GetGitHubReleases(ModInfo mod, string folder,
-			UpdaterWebClient client, List<string> errors)
+		private static DateTime? GetLocalVersion(string folder)
+		{
+			string versionPath = Path.Combine("mods", folder, "mod.version");
+			DateTime? localVersion = null;
+
+			if (File.Exists(versionPath))
+			{
+				string dateString = File.ReadAllText(versionPath).Trim();
+
+				if (DateTime.TryParse(dateString, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime date) ||
+				    DateTime.TryParse(dateString, CultureInfo.CurrentCulture, DateTimeStyles.None, out date))
+				{
+					localVersion = date;
+				}
+			}
+
+			if (!localVersion.HasValue)
+			{
+				var info = new FileInfo(Path.Combine("mods", folder, "mod.manifest"));
+				if (info.Exists)
+				{
+					localVersion = info.LastWriteTimeUtc;
+				}
+			}
+
+			return localVersion;
+		}
+
+		public ModDownload GetGitHubReleases(ModInfo mod, string folder, UpdaterWebClient client, List<string> errors)
 		{
 			List<GitHubRelease> releases;
-			var url = "https://api.github.com/repos/" + mod.GitHubRepo + "/releases";
+			string url = "https://api.github.com/repos/" + mod.GitHubRepo + "/releases";
+
 			if (!gitHubCache.ContainsKey(url))
 			{
 				try
 				{
-					var text = client.DownloadString(url);
+					string text = client.DownloadString(url);
 					releases = JsonConvert.DeserializeObject<List<GitHubRelease>>(text)
 						.Where(x => !x.Draft && !x.PreRelease)
 						.ToList();
@@ -44,27 +73,13 @@ namespace ModManagerCommon
 				releases = gitHubCache[url];
 			}
 
-			// No releases available.
 			if (releases == null || releases.Count == 0)
 			{
+				// No releases available.
 				return null;
 			}
 
-			string versionPath = Path.Combine("mods", folder, "mod.version");
-			DateTime? localVersion = null;
-
-			if (File.Exists(versionPath))
-			{
-				localVersion = DateTime.Parse(File.ReadAllText(versionPath).Trim());
-			}
-			else
-			{
-				var info = new FileInfo(Path.Combine("mods", folder, "mod.manifest"));
-				if (info.Exists)
-				{
-					localVersion = info.LastWriteTimeUtc;
-				}
-			}
+			DateTime? localVersion = GetLocalVersion(folder);
 
 			GitHubRelease latestRelease = null;
 			GitHubAsset latestAsset = null;
@@ -85,9 +100,9 @@ namespace ModManagerCommon
 				{
 					DateTime uploaded = DateTime.Parse(asset.Uploaded);
 
-					// No updates available.
 					if (localVersion >= uploaded)
 					{
+						// No updates available.
 						break;
 					}
 				}
@@ -107,21 +122,20 @@ namespace ModManagerCommon
 				return null;
 			}
 
-			var body = Regex.Replace(latestRelease.Body, "(?<!\r)\n", "\r\n");
+			string body = Regex.Replace(latestRelease.Body, "(?<!\r)\n", "\r\n");
 
 			return new ModDownload(mod, Path.Combine("mods", folder), latestAsset.DownloadUrl, body, latestAsset.Size)
 			{
 				HomePage   = "https://github.com/" + mod.GitHubRepo,
 				Name       = latestRelease.Name,
 				Version    = latestRelease.TagName,
-				Published  = latestRelease.Published,
-				Updated    = latestAsset.Uploaded,
+				Published  = DateTime.Parse(latestRelease.Published, DateTimeFormatInfo.InvariantInfo),
+				Updated    = DateTime.Parse(latestAsset.Uploaded, DateTimeFormatInfo.InvariantInfo),
 				ReleaseUrl = latestRelease.HtmlUrl
 			};
 		}
 
-		public ModDownload GetGameBananaReleases(ModInfo mod, string folder,
-			List<string> errors)
+		public ModDownload GetGameBananaReleases(ModInfo mod, string folder, List<string> errors)
 		{
 			GameBananaItem gbi;
 			try
@@ -134,56 +148,41 @@ namespace ModManagerCommon
 				return null;
 			}
 
-			// No releases available.
 			if (!gbi.HasUpdates)
 			{
+				// No releases available.
 				return null;
 			}
 
-			string versionPath = Path.Combine("mods", folder, "mod.version");
-			DateTime? localVersion = null;
-
-			if (File.Exists(versionPath))
-			{
-				localVersion = DateTime.Parse(File.ReadAllText(versionPath).Trim());
-			}
-			else
-			{
-				var info = new FileInfo(Path.Combine("mods", folder, "mod.manifest"));
-				if (info.Exists)
-				{
-					localVersion = info.LastWriteTimeUtc;
-				}
-			}
-
 			GameBananaItemUpdate latestUpdate = gbi.Updates[0];
+			DateTime? localVersion = GetLocalVersion(folder);
 
 			if (!ForceUpdate && localVersion.HasValue)
 			{
-				// No updates available.
 				if (localVersion >= latestUpdate.DateAdded)
 				{
+					// No updates available.
 					return null;
 				}
 			}
 
-			var body = string.Join(Environment.NewLine, latestUpdate.Changes.Select(a => a.Category + ": " + a.Text)) + Environment.NewLine + latestUpdate.Text;
+			string body = string.Join(Environment.NewLine, latestUpdate.Changes.Select(a => a.Category + ": " + a.Text)) + Environment.NewLine + latestUpdate.Text;
 
-			var dl = gbi.Files.First().Value;
+			GameBananaItemFile dl = gbi.Files.First().Value;
 
 			return new ModDownload(mod, Path.Combine("mods", folder), dl.DownloadUrl, body, dl.Filesize)
 			{
-				HomePage = gbi.ProfileUrl,
-				Name = latestUpdate.Title,
-				Version = latestUpdate.Title,
-				Published = latestUpdate.DateAdded.ToString(),
-				Updated = latestUpdate.DateAdded.ToString(),
+				HomePage   = gbi.ProfileUrl,
+				Name       = latestUpdate.Title,
+				Version    = latestUpdate.Title,
+				Published  = latestUpdate.DateAdded,
+				Updated    = latestUpdate.DateAdded,
 				ReleaseUrl = gbi.ProfileUrl
 			};
 		}
 
-		public ModDownload CheckModularVersion(ModInfo mod, string folder, List<ModManifest> localManifest,
-			UpdaterWebClient client, List<string> errors)
+		public ModDownload CheckModularVersion(ModInfo mod, string folder, List<ModManifestEntry> localManifest,
+		                                       UpdaterWebClient client, List<string> errors)
 		{
 			if (!mod.UpdateUrl.StartsWith("http://", StringComparison.InvariantCulture)
 				&& !mod.UpdateUrl.StartsWith("https://", StringComparison.InvariantCulture))
@@ -203,7 +202,7 @@ namespace ModManagerCommon
 
 			try
 			{
-				var dict = IniFile.IniFile.Load(client.OpenRead(url));
+				Dictionary<string, Dictionary<string, string>> dict = IniFile.IniFile.Load(client.OpenRead(url));
 				remoteInfo = IniSerializer.Deserialize<ModInfo>(dict);
 			}
 			catch (Exception ex)
@@ -229,7 +228,7 @@ namespace ModManagerCommon
 				return null;
 			}
 
-			List<ModManifest> remoteManifest;
+			List<ModManifestEntry> remoteManifest;
 
 			try
 			{
@@ -282,15 +281,16 @@ namespace ModManagerCommon
 			return new ModDownload(mod, Path.Combine("mods", folder), mod.UpdateUrl, changes, diff);
 		}
 
-		// TODO: cancel0
+		// TODO: cancel
 		/// <summary>
 		/// Get mod update metadata for the provided mods.
 		/// </summary>
 		/// <param name="updatableMods">Key-value pairs of mods to be checked, where the key is the mod path and the value is the mod metadata.</param>
 		/// <param name="updates">Output list of mods with available updates.</param>
 		/// <param name="errors">Output list of errors encountered during the update process.</param>
+		/// <param name="cancellationToken"><see cref="CancellationToken"/> for cancelling the operation. Currently unused.</param>
 		public void GetModUpdates(List<KeyValuePair<string, ModInfo>> updatableMods,
-			out List<ModDownload> updates, out List<string> errors, CancellationToken cancellationToken)
+		                          out List<ModDownload> updates, out List<string> errors, CancellationToken cancellationToken)
 		{
 			updates = new List<ModDownload>();
 			errors = new List<string>();
@@ -329,8 +329,8 @@ namespace ModManagerCommon
 					}
 					else if (!string.IsNullOrEmpty(mod.UpdateUrl))
 					{
-						List<ModManifest> localManifest = null;
-						var manPath = Path.Combine("mods", info.Key, "mod.manifest");
+						List<ModManifestEntry> localManifest = null;
+						string manPath = Path.Combine("mods", info.Key, "mod.manifest");
 
 						if (!ForceUpdate && File.Exists(manPath))
 						{

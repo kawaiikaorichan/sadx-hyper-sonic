@@ -9,6 +9,11 @@
 #include <unordered_map>
 #include <vector>
 #include <sstream>
+#include "direct3d.h"
+#include "bgscale.h"
+#include "hudscale.h"
+#include "testspawn.h"
+#include "json.hpp"
 
 using std::deque;
 using std::ifstream;
@@ -17,6 +22,7 @@ using std::wstring;
 using std::unique_ptr;
 using std::unordered_map;
 using std::vector;
+using json = nlohmann::json;
 
 // Win32 headers.
 #include <DbgHelp.h>
@@ -26,6 +32,7 @@ using std::vector;
 
 #include "git.h"
 #include "version.h"
+#include <direct.h>
 
 #include "IniFile.hpp"
 #include "CodeParser.hpp"
@@ -40,10 +47,23 @@ using std::vector;
 #include "FileSystem.h"
 #include "Events.h"
 #include "AutoMipmap.h"
-#include "UiScale.h"
+#include "uiscale.h"
 #include "FixFOV.h"
 #include "EXEData.h"
 #include "DLLData.h"
+#include "ChunkSpecularFix.h"
+#include "CrashDump.h"
+#include "MaterialColorFixes.h"
+#include "sound.h"
+#include "InterpolationFixes.h"
+#include "MinorPatches.h"
+#include "jvList.h"
+#include "Gbix.h"
+#include "input.h"
+#include <ShlObj.h>
+#include "gvm.h"
+#include "ExtendedSaveSupport.h"
+#include "NodeLimit.h"
 
 static HINSTANCE g_hinstDll = nullptr;
 
@@ -51,7 +71,7 @@ static HINSTANCE g_hinstDll = nullptr;
  * Show an error message indicating that this isn't the 2004 US version.
  * This function also calls ExitProcess(1).
  */
-static void ShowNon2004USError(void)
+static void ShowNon2004USError()
 {
 	MessageBox(nullptr, L"This copy of Sonic Adventure DX is not the 2004 US version.\n\n"
 		L"Please obtain the EXE file from the 2004 US version and try again.",
@@ -62,39 +82,35 @@ static void ShowNon2004USError(void)
 /**
  * Hook SADX's CreateFileA() import.
  */
-static void HookCreateFileA(void)
+static void HookCreateFileA()
 {
 	ULONG ulSize = 0;
-	PROC pNewFunction;
-	PROC pActualFunction;
-
-	PCSTR pcszModName;
 
 	// SADX module handle. (main executable)
 	HMODULE hModule = GetModuleHandle(nullptr);
-	PIMAGE_IMPORT_DESCRIPTOR pImportDesc;
 
-	pNewFunction = (PROC)MyCreateFileA;
+	PROC pNewFunction = (PROC)MyCreateFileA;
 	// Get the actual CreateFileA() using GetProcAddress().
-	pActualFunction = GetProcAddress(GetModuleHandle(L"Kernel32.dll"), "CreateFileA");
+	PROC pActualFunction = GetProcAddress(GetModuleHandle(L"Kernel32.dll"), "CreateFileA");
 	assert(pActualFunction != nullptr);
 
-	pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)ImageDirectoryEntryToData(
-		hModule, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &ulSize);
+	auto pImportDesc = (PIMAGE_IMPORT_DESCRIPTOR)ImageDirectoryEntryToData(hModule, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &ulSize);
 
 	if (pImportDesc == nullptr)
+	{
 		return;
+	}
 
 	for (; pImportDesc->Name; pImportDesc++)
 	{
 		// get the module name
-		pcszModName = (PCSTR)((PBYTE)hModule + pImportDesc->Name);
+		auto pcszModName = (PCSTR)((PBYTE)hModule + pImportDesc->Name);
 
 		// check if the module is kernel32.dll
 		if (pcszModName != nullptr && _stricmp(pcszModName, "Kernel32.dll") == 0)
 		{
 			// get the module
-			PIMAGE_THUNK_DATA pThunk = (PIMAGE_THUNK_DATA)((PBYTE)hModule + pImportDesc->FirstThunk);
+			auto pThunk = (PIMAGE_THUNK_DATA)((PBYTE)hModule + pImportDesc->FirstThunk);
 
 			for (; pThunk->u1.Function; pThunk++)
 			{
@@ -127,15 +143,17 @@ static void SetRDataWriteProtection(bool protect)
 	HMODULE hModule = GetModuleHandle(nullptr);
 
 	// Get the PE header.
-	const IMAGE_NT_HEADERS *const pNtHdr = ImageNtHeader(hModule);
+	const IMAGE_NT_HEADERS* const pNtHdr = ImageNtHeader(hModule);
 	// Section headers are located immediately after the PE header.
-	const IMAGE_SECTION_HEADER *pSectionHdr = reinterpret_cast<const IMAGE_SECTION_HEADER*>(pNtHdr+1);
+	const auto* pSectionHdr = reinterpret_cast<const IMAGE_SECTION_HEADER*>(pNtHdr + 1);
 
 	// Find the .rdata section.
 	for (unsigned int i = pNtHdr->FileHeader.NumberOfSections; i > 0; i--, pSectionHdr++)
 	{
 		if (strncmp(reinterpret_cast<const char*>(pSectionHdr->Name), ".rdata", sizeof(pSectionHdr->Name)) != 0)
+		{
 			continue;
+		}
 
 		// Found the .rdata section.
 		// Verify that this matches SADX.
@@ -185,38 +203,71 @@ static void __cdecl ProcessCodes()
 {
 	codeParser.processCodeList();
 	RaiseEvents(modFrameEvents);
+	uiscale::check_stack_balance();
 
 	const int numrows = (VerticalResolution / (int)DebugFontSize);
-	int pos;
-	if ((int)msgqueue.size() <= numrows - 1)
-		pos = (numrows - 1) - (msgqueue.size() - 1);
-	else
-		pos = 0;
-	if (msgqueue.size() > 0)
-		for (deque<message>::iterator iter = msgqueue.begin();
-			iter != msgqueue.end(); ++iter)
+	int pos = (int)msgqueue.size() <= numrows - 1 ? numrows - 1 - (msgqueue.size() - 1) : 0;
+
+	if (msgqueue.empty())
+	{
+		return;
+	}
+
+	for (auto iter = msgqueue.begin();
+		iter != msgqueue.end(); ++iter)
 	{
 		int c = -1;
+
 		if (300 - iter->time < LengthOfArray(fadecolors))
+		{
 			c = fadecolors[LengthOfArray(fadecolors) - (300 - iter->time) - 1];
+		}
+
 		SetDebugFontColor((int)c);
-		DisplayDebugString(pos++, (char *)iter->text.c_str());
+		DisplayDebugString(pos++, (char*)iter->text.c_str());
 		if (++iter->time >= 300)
 		{
 			msgqueue.pop_front();
-			if (msgqueue.size() == 0)
+
+			if (msgqueue.empty())
+			{
 				break;
+			}
+
 			iter = msgqueue.begin();
 		}
+
 		if (pos == numrows)
+		{
 			break;
+		}
 	}
 }
 
+//used to get external lib location and extra config
+std::wstring appPath;
+std::wstring extLibPath;
+
+void SetAppPathConfig(std::wstring gamepath)
+{
+	appPath = gamepath + L"\\SAManager\\"; // Account for portable
+	extLibPath = appPath + L"extlib\\";
+	WCHAR appDataLocalPath[MAX_PATH];
+	if (!Exists(appPath))
+	{
+		if (SUCCEEDED(SHGetFolderPath(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, appDataLocalPath)))
+		{
+			appPath = appDataLocalPath;
+			appPath += L"\\SAManager\\";
+			extLibPath = appPath + L"extlib\\";
+		}
+	}
+}
 
 static bool dbgConsole, dbgScreen;
+static bool pauseWhenInactive;
 // File for logging debugging output.
-static FILE *dbgFile = nullptr;
+static FILE* dbgFile = nullptr;
 
 /**
  * SADX Debug Output function.
@@ -224,15 +275,15 @@ static FILE *dbgFile = nullptr;
  * @param ... Arguments.
  * @return Return value from vsnprintf().
  */
-static int __cdecl SADXDebugOutput(const char *Format, ...)
+static int __cdecl SADXDebugOutput(const char* Format, ...)
 {
 	va_list ap;
 	va_start(ap, Format);
 	int result = vsnprintf(nullptr, 0, Format, ap) + 1;
 	va_end(ap);
-	char *buf = new char[result+1];
+	char* buf = new char[result + 1];
 	va_start(ap, Format);
-	result = vsnprintf(buf, result+1, Format, ap);
+	result = vsnprintf(buf, result + 1, Format, ap);
 	va_end(ap);
 
 	// Console output.
@@ -249,10 +300,10 @@ static int __cdecl SADXDebugOutput(const char *Format, ...)
 		message msg = { { buf }, 0 };
 		// Remove trailing newlines if present.
 		while (!msg.text.empty() &&
-			(msg.text[msg.text.size()-1] == '\n' ||
-			 msg.text[msg.text.size()-1] == '\r'))
+			(msg.text[msg.text.size() - 1] == '\n' ||
+				msg.text[msg.text.size() - 1] == '\r'))
 		{
-			msg.text.resize(msg.text.size()-1);
+			msg.text.resize(msg.text.size() - 1);
 		}
 		msgqueue.push_back(msg);
 	}
@@ -262,7 +313,7 @@ static int __cdecl SADXDebugOutput(const char *Format, ...)
 	{
 		// SADX prints text in Shift-JIS.
 		// Convert it to UTF-8 before writing it to the debug file.
-		char *utf8 = SJIStoUTF8(buf);
+		char* utf8 = SJIStoUTF8(buf);
 		if (utf8)
 		{
 			fputs(utf8, dbgFile);
@@ -276,8 +327,24 @@ static int __cdecl SADXDebugOutput(const char *Format, ...)
 }
 
 enum windowmodes { windowed, fullscreen };
-struct windowsize { int x; int y; int width; int height; };
-struct windowdata { int x; int y; int width; int height; DWORD style; DWORD exStyle; };
+
+struct windowsize
+{
+	int x;
+	int y;
+	int width;
+	int height;
+};
+
+struct windowdata
+{
+	int x;
+	int y;
+	int width;
+	int height;
+	DWORD style;
+	DWORD exStyle;
+};
 
 // Used for borderless windowed mode.
 // Defines the size of the outer-window which wraps the game window and draws the background.
@@ -290,11 +357,12 @@ static windowdata outerSizes[] = {
 // Defines the size of the inner-window on which the game is rendered.
 static windowsize innerSizes[2] = {};
 
-static HWND        accelWindow = nullptr;
-static windowmodes windowMode  = windowmodes::windowed;
-static HACCEL      accelTable  = nullptr;
+static HWND accelWindow = nullptr;
+static windowmodes windowMode = windowmodes::windowed;
+static HACCEL accelTable = nullptr;
 
 DataPointer(int, dword_3D08534, 0x3D08534);
+
 static void __cdecl HandleWindowMessages_r()
 {
 	MSG Msg; // [sp+4h] [bp-1Ch]@1
@@ -319,17 +387,17 @@ static void __cdecl HandleWindowMessages_r()
 
 static vector<RECT> screenBounds;
 static Gdiplus::Bitmap* backgroundImage = nullptr;
-static bool switchingWindowMode         = false;
-static bool borderlessWindow            = false;
-static bool scaleScreen                 = true;
-static bool windowResize                = false;
-static unsigned int screenNum           = 1;
-static bool customWindowSize            = false;
-static int customWindowWidth            = 640;
-static int customWindowHeight           = 480;
-static bool vsync                       = false;
-
-DataPointer(HWND, hWnd, 0x3D0FD30);
+static bool switchingWindowMode = false;
+static bool borderlessWindow = false;
+static char voiceLanguage = 1;
+static char textLanguage = 1;
+static bool scaleScreen = true;
+static bool windowResize = false;
+static unsigned int screenNum = 1;
+static bool customWindowSize = false;
+static int customWindowWidth = 640;
+static int customWindowHeight = 480;
+static bool textureFilter = true;
 
 static BOOL CALLBACK GetMonitorSize(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lprcMonitor, LPARAM dwData)
 {
@@ -340,310 +408,158 @@ static BOOL CALLBACK GetMonitorSize(HMONITOR hMonitor, HDC hdcMonitor, LPRECT lp
 static const uint8_t wndpatch[] = { 0xA1, 0x30, 0xFD, 0xD0, 0x03, 0xEB, 0x08 }; // mov eax,[hWnd] / jmp short 0xf
 static int currentScreenSize[2];
 
-static inline void Direct3D_SetupVsyncParameters()
-{
-	auto& p = PresentParameters;
-
-	if (vsync)
-	{
-		p.SwapEffect = D3DSWAPEFFECT_COPY_VSYNC;
-		p.FullScreen_PresentationInterval = IsWindowed ? D3DPRESENT_INTERVAL_DEFAULT : D3DPRESENT_INTERVAL_ONE;
-	}
-	else
-	{
-		p.SwapEffect = D3DSWAPEFFECT_DISCARD;
-		p.FullScreen_PresentationInterval = IsWindowed ? D3DPRESENT_INTERVAL_DEFAULT : D3DPRESENT_INTERVAL_IMMEDIATE;
-	}
-}
-
-static void __fastcall CreateDirect3DDevice_r(void*, int behavior, D3DDEVTYPE type)
-{
-	if (Direct3D_Device != nullptr)
-		return;
-
-	Direct3D_SetupVsyncParameters();
-
-	auto result = Direct3D_Object->CreateDevice(DisplayAdapter, type, PresentParameters.hDeviceWindow, behavior, &PresentParameters, &Direct3D_Device);
-
-	if (FAILED(result))
-		Direct3D_Device = nullptr;
-}
-
-DataPointer(D3DVIEWPORT8, Direct3D_ViewPort, 0x3D12780);
-
-static HRESULT Direct3D_Reset()
-{
-	// Grab the current FOV before making any changes.
-	auto fov = fov::get_fov();
-
-	DWORD fogenable, fogcolor, fogtablemode, fogstart, fogend, fogdensity;
-
-	Direct3D_Device->GetRenderState(D3DRS_FOGENABLE, &fogenable);
-	Direct3D_Device->GetRenderState(D3DRS_FOGCOLOR, &fogcolor);
-	Direct3D_Device->GetRenderState(D3DRS_FOGTABLEMODE, &fogtablemode);
-	Direct3D_Device->GetRenderState(D3DRS_FOGSTART, &fogstart);
-	Direct3D_Device->GetRenderState(D3DRS_FOGEND, &fogend);
-	Direct3D_Device->GetRenderState(D3DRS_FOGDENSITY, &fogdensity);
-
-	HRESULT result = Direct3D_Device->Reset(&PresentParameters);
-
-	if (FAILED(result))
-	{
-		return result;
-	}
-
-	Direct3D_Device->SetRenderState(D3DRS_FOGENABLE, fogenable != 0);
-	Direct3D_Device->SetRenderState(D3DRS_FOGCOLOR, fogcolor);
-	Direct3D_Device->SetRenderState(D3DRS_FOGTABLEMODE, fogtablemode);
-	Direct3D_Device->SetRenderState(D3DRS_FOGSTART, fogstart);
-	Direct3D_Device->SetRenderState(D3DRS_FOGEND, fogend);
-	Direct3D_Device->SetRenderState(D3DRS_FOGDENSITY, fogdensity);
-
-	Direct3D_Device->GetViewport(&Direct3D_ViewPort);
-
-	ViewPortWidth        = static_cast<float>(Direct3D_ViewPort.Width);
-	HorizontalResolution = Direct3D_ViewPort.Width;
-	ViewPortWidth_Half   = ViewPortWidth / 2.0f;
-	ViewPortHeight       = static_cast<float>(Direct3D_ViewPort.Height);
-	VerticalResolution   = Direct3D_ViewPort.Height;
-	ViewPortHeight_Half  = ViewPortHeight / 2.0f;
-	HorizontalStretch    = static_cast<float>(HorizontalResolution) / 640.0f;
-	VerticalStretch      = static_cast<float>(VerticalResolution) / 480.0f;
-
-	auto points = GlobalPoint2Col.p;
-
-	points[0].x = 0.0f;
-	points[0].y = 0.0f;
-	points[1].x = ViewPortWidth;
-	points[1].y = 0.0f;
-	points[2].x = ViewPortWidth;
-	points[2].y = ViewPortHeight;
-	points[3].x = 0.0f;
-	points[3].y = ViewPortHeight;
-
-	fov::check_aspect_ratio();
-
-	SetupSomeScreenStuff();
-	Direct3D_SetProjectionMatrix_(&ProjectionMatrix);
-	uiscale::update_parameters();
-	Direct3D_SetDefaultRenderState();
-	Direct3D_SetDefaultTextureStageState();
-
-	// Restores previously set FOV in case the game doesn't on its own.
-	njSetPerspective(fov);
-
-	RaiseEvents(modRenderDeviceReset);
-
-	return result;
-}
-
-static void Direct3D_DeviceLost()
-{
-	const auto retry_count = 5;
-	DWORD reset = D3D_OK;
-	Uint32 tries = 0;
-
-	Direct3D_SetupVsyncParameters();
-
-	auto level = D3DERR_DEVICENOTRESET;
-	RaiseEvents(modRenderDeviceLost);
-
-	while (tries < retry_count)
-	{
-		if (level == D3DERR_DEVICENOTRESET)
-		{
-			if (SUCCEEDED(reset = Direct3D_Reset()))
-			{
-				return;
-			}
-
-			if (++tries >= retry_count)
-			{
-				const wchar_t *errstr;
-				switch (reset)
-				{
-					default:
-					case static_cast<DWORD>(D3DERR_INVALIDCALL):
-						errstr = L"D3DERR_INVALIDCALL";
-						break;
-					case static_cast<DWORD>(D3DERR_OUTOFVIDEOMEMORY):
-						errstr = L"D3DERR_OUTOFVIDEOMEMORY";
-						break;
-					case static_cast<DWORD>(E_OUTOFMEMORY):
-						errstr = L"E_OUTOFMEMORY";
-						break;
-					case static_cast<DWORD>(D3DERR_DEVICELOST):
-						errstr = L"D3DERR_DEVICELOST";
-						break;
-					case static_cast<DWORD>(D3DERR_DRIVERINTERNALERROR):
-						errstr = L"D3DERR_DRIVERINTERNALERROR";
-						break;
-				}
-
-				wchar_t wbuf[256];
-				swprintf(wbuf, LengthOfArray(wbuf),
-					L"The following error occurred while trying to reset DirectX:\n\n%s\n\n"
-					L"Press Cancel to exit, or press Retry to try again.", errstr);
-				DWORD mb_result = MessageBox(hWnd, wbuf,
-					L"Direct3D Reset failed", MB_RETRYCANCEL | MB_ICONERROR);
-				if (mb_result == IDRETRY)
-				{
-					tries = 0;
-					continue;
-				}
-			}
-		}
-
-		Sleep(1000);
-		level = Direct3D_Device->TestCooperativeLevel();
-	}
-
-	exit(reset);
-}
-
-static void __cdecl Direct3D_Present_r()
-{
-	if (Direct3D_Device->Present(nullptr, nullptr, nullptr, nullptr) == D3DERR_DEVICELOST)
-	{
-		Direct3D_DeviceLost();
-	}
-}
-
 static LRESULT CALLBACK WrapperWndProc(HWND wrapper, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	switch (uMsg)
 	{
-		case WM_ACTIVATE:
-			if ((LOWORD(wParam) != WA_INACTIVE && !lParam) || reinterpret_cast<HWND>(lParam) == hWnd)
-			{
-				SetFocus(hWnd);
-				return 0;
-			}
+	case WM_ACTIVATE:
+		if ((LOWORD(wParam) != WA_INACTIVE && !lParam) || reinterpret_cast<HWND>(lParam) == WindowHandle)
+		{
+			SetFocus(WindowHandle);
+			return 0;
+		}
+		break;
+
+	case WM_CLOSE:
+		// we also need to let SADX do cleanup
+		SendMessageA(WindowHandle, WM_CLOSE, wParam, lParam);
+		// what we do here is up to you: we can check if SADX decides to close, and if so, destroy ourselves, or something like that
+		return 0;
+
+	case WM_ERASEBKGND:
+	{
+		if (backgroundImage == nullptr || windowResize)
+		{
+			break;
+		}
+
+		Gdiplus::Graphics gfx((HDC)wParam);
+		gfx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+
+		RECT rect;
+		GetClientRect(wrapper, &rect);
+
+		auto w = rect.right - rect.left;
+		auto h = rect.bottom - rect.top;
+
+		if (w == innerSizes[windowMode].width && h == innerSizes[windowMode].height)
+		{
+			break;
+		}
+
+		gfx.DrawImage(backgroundImage, 0, 0, w, h);
+		return 0;
+	}
+
+	case WM_SIZE:
+	{
+		auto& inner = innerSizes[windowMode];
+
+		if (windowResize)
+		{
+			inner.x = 0;
+			inner.y = 0;
+			inner.width = LOWORD(lParam);
+			inner.height = HIWORD(lParam);
+		}
+
+		// update the inner window (game view)
+		SetWindowPos(WindowHandle, HWND_TOP, inner.x, inner.y, inner.width, inner.height, 0);
+		break;
+	}
+
+	case WM_COMMAND:
+	{
+		if (wParam != MAKELONG(ID_FULLSCREEN, 1))
 			break;
 
-		case WM_CLOSE:
-			// we also need to let SADX do cleanup
-			SendMessageA(hWnd, WM_CLOSE, wParam, lParam);
-			// what we do here is up to you: we can check if SADX decides to close, and if so, destroy ourselves, or something like that
-			return 0;
+		switchingWindowMode = true;
 
-		case WM_ERASEBKGND:
+		if (windowMode == windowed)
 		{
-			if (backgroundImage == nullptr || windowResize)
-			{
-				break;
-			}
-
-			Gdiplus::Graphics gfx((HDC)wParam);
-			gfx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-
 			RECT rect;
-			GetClientRect(wrapper, &rect);
+			GetWindowRect(wrapper, &rect);
 
-			auto w = rect.right - rect.left;
-			auto h = rect.bottom - rect.top;
-
-			if (w == innerSizes[windowMode].width && h == innerSizes[windowMode].height)
-			{
-				break;
-			}
-			
-			gfx.DrawImage(backgroundImage, 0, 0, w, h);
-			return 0;
+			outerSizes[windowMode].x = rect.left;
+			outerSizes[windowMode].y = rect.top;
+			outerSizes[windowMode].width = rect.right - rect.left;
+			outerSizes[windowMode].height = rect.bottom - rect.top;
+			outerSizes[windowMode].style = GetWindowLongA(accelWindow, GWL_STYLE);
+			outerSizes[windowMode].exStyle = GetWindowLongA(accelWindow, GWL_EXSTYLE);
 		}
 
-		case WM_SIZE:
+		windowMode = windowMode == windowed ? fullscreen : windowed;
+
+		// update outer window (draws background)
+		const auto& outer = outerSizes[windowMode];
+		SetWindowLongA(accelWindow, GWL_STYLE, outer.style);
+		SetWindowLongA(accelWindow, GWL_EXSTYLE, outer.exStyle);
+		SetWindowPos(accelWindow, HWND_NOTOPMOST, outer.x, outer.y, outer.width, outer.height, SWP_FRAMECHANGED);
+
+		switchingWindowMode = false;
+		return 0;
+	}
+
+	case WM_ACTIVATEAPP:
+		if (!switchingWindowMode)
 		{
-			auto& inner = innerSizes[windowMode];
-
-			if (windowResize)
+			if (pauseWhenInactive)
 			{
-				inner.x      = 0;
-				inner.y      = 0;
-				inner.width  = LOWORD(lParam);
-				inner.height = HIWORD(lParam);
+				if (wParam)
+				{
+					if (!IsGamePaused())
+					{
+						UnpauseAllSounds(0);
+					}
+					else
+						ResumeMusic();
+				}
+				else
+					PauseAllSounds(0);
 			}
-
-			// update the inner window (game view)
-			SetWindowPos(hWnd, HWND_TOP, inner.x, inner.y, inner.width, inner.height, 0);
-			break;
+			WndProc_B(WindowHandle, uMsg, wParam, lParam);
 		}
 
-		case WM_COMMAND:
+		if (windowMode == windowed)
 		{
-			if (wParam != MAKELONG(ID_FULLSCREEN, 1))
-				break;
-
-			switchingWindowMode = true;
-
-			if (windowMode == windowed)
-			{
-				RECT rect;
-				GetWindowRect(wrapper, &rect);
-
-				outerSizes[windowMode].x       = rect.left;
-				outerSizes[windowMode].y       = rect.top;
-				outerSizes[windowMode].width   = rect.right - rect.left;
-				outerSizes[windowMode].height  = rect.bottom - rect.top;
-				outerSizes[windowMode].style   = GetWindowLongA(accelWindow, GWL_STYLE);
-				outerSizes[windowMode].exStyle = GetWindowLongA(accelWindow, GWL_EXSTYLE);
-			}
-
-			windowMode = windowMode == windowed ? fullscreen : windowed;
-			
-			// update outer window (draws background)
-			const auto& outer = outerSizes[windowMode];
-			SetWindowLongA(accelWindow, GWL_STYLE, outer.style);
-			SetWindowLongA(accelWindow, GWL_EXSTYLE, outer.exStyle);
-			SetWindowPos(accelWindow, HWND_NOTOPMOST, outer.x, outer.y, outer.width, outer.height, SWP_FRAMECHANGED);
-
-			switchingWindowMode = false;
-			return 0;
+			while (ShowCursor(TRUE) < 0);
+		}
+		else
+		{
+			while (ShowCursor(FALSE) > 0);
 		}
 
-		case WM_ACTIVATEAPP:
-			if (!switchingWindowMode)
-			{
-				WndProc_B(hWnd, uMsg, wParam, lParam);
-			}
-
-			if (windowMode == windowed)
-			{
-				while (ShowCursor(TRUE) < 0);
-			}
-			else
-			{
-				while (ShowCursor(FALSE) > 0);
-			}
-
-		default:
-			break;
+	default:
+		break;
 	}
 
 	// alternatively we can return SendMe
 	return DefWindowProcA(wrapper, uMsg, wParam, lParam);
 }
 
-static RECT   last_rect    = {};
-static Uint32 last_width   = 0;
-static Uint32 last_height  = 0;
-static DWORD  last_style   = 0;
+static RECT   last_rect = {};
+static Uint32 last_width = 0;
+static Uint32 last_height = 0;
+static DWORD  last_style = 0;
 static DWORD  last_exStyle = 0;
 
-static void EnableFullScreen(HWND handle)
+static void enable_fullscreen_mode(HWND handle)
 {
 	IsWindowed = false;
 	last_width = HorizontalResolution;
 	last_height = VerticalResolution;
 
 	GetWindowRect(handle, &last_rect);
+
 	last_style = GetWindowLongA(handle, GWL_STYLE);
 	last_exStyle = GetWindowLongA(handle, GWL_EXSTYLE);
+
 	SetWindowLongA(handle, GWL_STYLE, WS_POPUP | WS_SYSMENU | WS_VISIBLE);
+
 	while (ShowCursor(FALSE) > 0);
 }
 
-static void EnableWindowedMode(HWND handle)
+static void enable_windowed_mode(HWND handle)
 {
 	SetWindowLongA(handle, GWL_STYLE, last_style);
 	SetWindowLongA(handle, GWL_EXSTYLE, last_exStyle);
@@ -654,15 +570,19 @@ static void EnableWindowedMode(HWND handle)
 	if (width <= 0 || height <= 0)
 	{
 		last_rect = {};
+
 		last_rect.right = 640;
 		last_rect.bottom = 480;
+
 		AdjustWindowRectEx(&last_rect, last_style, false, last_exStyle);
+
 		width = last_rect.right - last_rect.left;
 		height = last_rect.bottom - last_rect.top;
 	}
 
 	SetWindowPos(handle, HWND_NOTOPMOST, last_rect.left, last_rect.top, width, height, 0);
 	IsWindowed = true;
+
 	while (ShowCursor(TRUE) < 0);
 }
 
@@ -670,78 +590,69 @@ static LRESULT CALLBACK WndProc_Resizable(HWND handle, UINT Msg, WPARAM wParam, 
 {
 	switch (Msg)
 	{
-		default:
-			break;
+	default:
+		break;
 
-		case WM_DESTROY:
-			PostQuitMessage(0);
-			break;
+	case WM_SYSKEYDOWN:
+		if (wParam != VK_F4 && wParam != VK_F2 && wParam != VK_RETURN) return 0;
 
-		case WM_SIZE:
+	case WM_SYSKEYUP:
+		if (wParam != VK_F4 && wParam != VK_F2 && wParam != VK_RETURN) return 0;
+
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		break;
+
+	case WM_SIZE:
+	{
+		if (customWindowSize)
 		{
-			if (customWindowSize)
-			{
-				break;
-			}
-
-			if (!IsWindowed || Direct3D_Device == nullptr)
-			{
-				return 0;
-			}
-
-			int w = LOWORD(lParam);
-			int h = HIWORD(lParam);
-
-			if (!w || !h)
-			{
-				break;
-			}
-
-			if (w == HorizontalResolution && h == VerticalResolution)
-			{
-				break;
-			}
-
-			PresentParameters.BackBufferWidth = w;
-			PresentParameters.BackBufferHeight = h;
-
-		#ifdef _DEBUG
-			PrintDebug("Changing resolution from %ux%u to %ux%u\n",
-				HorizontalResolution, VerticalResolution, w, h);
-		#endif
-
-			Direct3D_DeviceLost();
 			break;
 		}
 
-		case WM_COMMAND:
+		if (!IsWindowed || Direct3D_Device == nullptr)
 		{
-			if (wParam != MAKELONG(ID_FULLSCREEN, 1))
-				break;
-
-			if (PresentParameters.Windowed && IsWindowed)
-			{
-				EnableFullScreen(handle);
-
-				const auto& rect = screenBounds[screenNum == 0 ? 0 : screenNum - 1];
-
-				PresentParameters.Windowed         = false;
-				PresentParameters.BackBufferWidth  = rect.right - rect.left;
-				PresentParameters.BackBufferHeight = rect.bottom - rect.top;
-				Direct3D_DeviceLost();
-			}
-			else
-			{
-				PresentParameters.Windowed         = true;
-				PresentParameters.BackBufferWidth  = last_width;
-				PresentParameters.BackBufferHeight = last_height;
-				Direct3D_DeviceLost();
-
-				EnableWindowedMode(handle);
-			}
-
 			return 0;
 		}
+
+		int w = LOWORD(lParam);
+		int h = HIWORD(lParam);
+
+		if (!w || !h)
+		{
+			break;
+		}
+
+		direct3d::change_resolution(w, h);
+		break;
+	}
+
+	case WM_COMMAND:
+	{
+		if (wParam != MAKELONG(ID_FULLSCREEN, 1))
+		{
+			break;
+		}
+
+		if (direct3d::is_windowed() && IsWindowed)
+		{
+			enable_fullscreen_mode(handle);
+
+			const auto& rect = screenBounds[screenNum == 0 ? 0 : screenNum - 1];
+
+			const auto w = rect.right - rect.left;
+			const auto h = rect.bottom - rect.top;
+
+			direct3d::change_resolution(w, h, false);
+		}
+		else
+		{
+			direct3d::change_resolution(last_width, last_height, true);
+			enable_windowed_mode(handle);
+		}
+
+		return 0;
+	}
 	}
 
 	return DefWindowProcA(handle, Msg, wParam, lParam);
@@ -749,35 +660,60 @@ static LRESULT CALLBACK WndProc_Resizable(HWND handle, UINT Msg, WPARAM wParam, 
 
 LRESULT __stdcall WndProc_hook(HWND handle, UINT Msg, WPARAM wParam, LPARAM lParam)
 {
+	if ((Msg == WM_SYSKEYDOWN || Msg == WM_SYSKEYUP) && ((wParam != VK_F4 && wParam != VK_F2 && wParam != VK_RETURN))) return 0;
 	return DefWindowProcA(handle, Msg, wParam, lParam);
+}
+
+wstring borderimg = L"mods\\Border.png";
+
+static void ResumeAllSoundsPause()
+{
+	if (!IsGamePaused())
+	{
+		UnpauseAllSounds(0);
+	}
+	else
+		ResumeMusic();
+}
+
+static void PauseAllSoundsAndMusic()
+{
+	PauseAllSounds(0);
 }
 
 static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 {
 	// Primary window class name.
-	const char *const lpszClassName = GetWindowClassName();
+	const char* const lpszClassName = GetWindowClassName();
 
 	// Hook default return of SADX's window procedure to force it to return DefWindowProc
 	WriteJump(reinterpret_cast<void*>(0x00789E48), WndProc_hook);
 
 	// Primary window class for SADX.
-	WNDCLASSA v8; // [sp+4h] [bp-28h]@1
-	v8.style         = 0;
-	v8.lpfnWndProc   = (windowResize ? WndProc_Resizable : WndProc);
-	v8.cbClsExtra    = 0;
-	v8.cbWndExtra    = 0;
-	v8.hInstance     = hInstance;
-	v8.hIcon         = LoadIconA(hInstance, MAKEINTRESOURCEA(101));
-	v8.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+	WNDCLASSA v8{}; // [sp+4h] [bp-28h]@1
+
+	v8.style = 0;
+	v8.lpfnWndProc = (windowResize ? WndProc_Resizable : WndProc);
+	v8.cbClsExtra = 0;
+	v8.cbWndExtra = 0;
+	v8.hInstance = hInstance;
+	v8.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(101));
+	v8.hCursor = LoadCursor(nullptr, IDC_ARROW);
 	v8.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
-	v8.lpszMenuName  = nullptr;
+	v8.lpszMenuName = nullptr;
 	v8.lpszClassName = lpszClassName;
+
 	if (!RegisterClassA(&v8))
+	{
+		MessageBox(nullptr, L"Failed to register class A to create SADX Window, game won't work.", L"Failed to create SADX Window", MB_OK | MB_ICONERROR);
 		return;
+	}
 
 	RECT windowRect;
+
 	windowRect.top = 0;
 	windowRect.left = 0;
+
 	if (customWindowSize)
 	{
 		windowRect.right = customWindowWidth;
@@ -793,8 +729,8 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 	{
 		currentScreenSize[0] = GetSystemMetrics(SM_CXSCREEN);
 		currentScreenSize[1] = GetSystemMetrics(SM_CYSCREEN);
-		WriteData((int **)0x79426E, &currentScreenSize[0]);
-		WriteData((int **)0x79427A, &currentScreenSize[1]);
+		WriteData((int**)0x79426E, &currentScreenSize[0]);
+		WriteData((int**)0x79427A, &currentScreenSize[1]);
 	}
 
 	EnumDisplayMonitors(nullptr, nullptr, GetMonitorSize, 0);
@@ -803,9 +739,12 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 	if (screenNum > 0)
 	{
 		if (screenBounds.size() < screenNum)
+		{
 			screenNum = 1;
+		}
 
 		RECT screenSize = screenBounds[screenNum - 1];
+
 		wsX = screenX = screenSize.left;
 		wsY = screenY = screenSize.top;
 		wsW = screenW = screenSize.right - screenSize.left;
@@ -817,6 +756,7 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 		screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
 		screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
 		screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
 		wsX = 0;
 		wsY = 0;
 		wsW = GetSystemMetrics(SM_CXSCREEN);
@@ -827,8 +767,12 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 
 	if (borderlessWindow)
 	{
+		PrintDebug("Creating SADX Window in borderless mode...\n");
+
 		if (windowResize)
+		{
 			outerSizes[windowed].style |= WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SIZEBOX;
+		}
 
 		AdjustWindowRectEx(&windowRect, outerSizes[windowed].style, false, 0);
 
@@ -846,6 +790,7 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 		if (customWindowSize)
 		{
 			float num = min((float)customWindowWidth / (float)HorizontalResolution, (float)customWindowHeight / (float)VerticalResolution);
+
 			innerSizes[windowed].width = (int)((float)HorizontalResolution * num);
 			innerSizes[windowed].height = (int)((float)VerticalResolution * num);
 			innerSizes[windowed].x = (customWindowWidth - innerSizes[windowed].width) / 2;
@@ -862,6 +807,7 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 		if (scaleScreen)
 		{
 			float num = min((float)screenW / (float)HorizontalResolution, (float)screenH / (float)VerticalResolution);
+
 			innerSizes[fullscreen].width = (int)((float)HorizontalResolution * num);
 			innerSizes[fullscreen].height = (int)((float)VerticalResolution * num);
 		}
@@ -876,30 +822,38 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 
 		windowMode = IsWindowed ? windowed : fullscreen;
 
-		if (FileExists(L"mods\\Border.png"))
+		if (!FileExists(borderimg))
+		{
+			borderimg = L"mods\\Border_Default.png";
+		}
+
+		if (FileExists(borderimg))
 		{
 			Gdiplus::GdiplusStartupInput gdiplusStartupInput;
 			ULONG_PTR gdiplusToken;
 			Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
-			backgroundImage = Gdiplus::Bitmap::FromFile(L"mods\\Border.png");
+			backgroundImage = Gdiplus::Bitmap::FromFile(borderimg.c_str());
 		}
 
 		// Register a window class for the wrapper window.
 		WNDCLASSA w;
 
-		w.style         = 0;
-		w.lpfnWndProc   = WrapperWndProc;
-		w.cbClsExtra    = 0;
-		w.cbWndExtra    = 0;
-		w.hInstance     = hInstance;
-		w.hIcon         = LoadIconA(hInstance, MAKEINTRESOURCEA(101));
-		w.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+		w.style = 0;
+		w.lpfnWndProc = WrapperWndProc;
+		w.cbClsExtra = 0;
+		w.cbWndExtra = 0;
+		w.hInstance = hInstance;
+		w.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(101));
+		w.hCursor = LoadCursor(nullptr, IDC_ARROW);
 		w.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
-		w.lpszMenuName  = nullptr;
+		w.lpszMenuName = nullptr;
 		w.lpszClassName = "WrapperWindow";
 
 		if (!RegisterClassA(&w))
+		{
+			MessageBox(nullptr, L"Failed to register class A to create SADX Window with Borderless settings, game won't work.", L"Failed to create SADX Window", MB_OK | MB_ICONERROR);
 			return;
+		}
 
 		const auto& outerSize = outerSizes[windowMode];
 
@@ -911,28 +865,40 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 			nullptr, nullptr, hInstance, nullptr);
 
 		if (accelWindow == nullptr)
+		{
+			MessageBox(nullptr, L"Failed to Create AccelWindow with Borderless settings, game won't work.", L"Failed to create SADX Window", MB_OK | MB_ICONERROR);
 			return;
+		}
 
 		const auto& innerSize = innerSizes[windowMode];
 
-		hWnd = CreateWindowExA(0,
+		WindowHandle = CreateWindowExA(0,
 			lpszClassName,
 			lpszClassName,
 			WS_CHILD | WS_VISIBLE,
 			innerSize.x, innerSize.y, innerSize.width, innerSize.height,
 			accelWindow, nullptr, hInstance, nullptr);
 
-		SetFocus(hWnd);
+		if (WindowHandle == nullptr)
+		{
+			MessageBox(nullptr, L"Failed to Create SADX Window with Borderless settings, game won't work.", L"Failed to create SADX Window", MB_OK | MB_ICONERROR);
+			return;
+		}
+
+		SetFocus(WindowHandle);
 		ShowWindow(accelWindow, nCmdShow);
 		UpdateWindow(accelWindow);
 		SetForegroundWindow(accelWindow);
 
+		PrintDebug("Successfully created SADX Window!\n");
 		IsWindowed = true;
 
-		WriteData((void *)0x402C61, wndpatch);
+		WriteData((void*)0x402C61, wndpatch);
 	}
 	else
 	{
+		PrintDebug("Creating SADX Window...\n");
+
 		DWORD dwStyle = WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
 		DWORD dwExStyle = 0;
 
@@ -942,38 +908,52 @@ static void CreateSADXWindow_r(HINSTANCE hInstance, int nCmdShow)
 		}
 
 		AdjustWindowRectEx(&windowRect, dwStyle, false, dwExStyle);
+
 		int w = windowRect.right - windowRect.left;
 		int h = windowRect.bottom - windowRect.top;
 		int x = wsX + ((wsW - w) / 2);
 		int y = wsY + ((wsH - h) / 2);
-		hWnd = CreateWindowExA(dwExStyle,
+
+		WindowHandle = CreateWindowExA(dwExStyle,
 			lpszClassName,
 			lpszClassName,
 			dwStyle,
 			x, y, w, h,
 			nullptr, nullptr, hInstance, nullptr);
 
-		if (!IsWindowed)
+		if (WindowHandle == nullptr)
 		{
-			EnableFullScreen(hWnd);
+			MessageBox(nullptr, L"Failed to Create SADX Window, game won't work.", L"Failed to create SADX Window", MB_OK | MB_ICONERROR);
+			return;
 		}
 
-		ShowWindow(hWnd, nCmdShow);
-		UpdateWindow(hWnd);
-		SetForegroundWindow(hWnd);
 
-		accelWindow = hWnd;
+		if (!IsWindowed)
+		{
+			enable_fullscreen_mode(WindowHandle);
+		}
+
+		ShowWindow(WindowHandle, nCmdShow);
+		UpdateWindow(WindowHandle);
+		SetForegroundWindow(WindowHandle);
+
+		accelWindow = WindowHandle;
+
+		WriteCall((void*)0x00401920, ResumeAllSoundsPause);
+		WriteCall((void*)0x00401939, PauseAllSoundsAndMusic);
+
+		PrintDebug("Successfully created SADX Window!\n");
 	}
 
 	// Hook the window message handler.
-	WriteJump((void *)HandleWindowMessages, (void *)HandleWindowMessages_r);
+	WriteJump((void*)HandleWindowMessages, (void*)HandleWindowMessages_r);
 }
 
 static __declspec(naked) void CreateSADXWindow_asm()
 {
 	__asm
 	{
-		mov ebx, [esp+4]
+		mov ebx, [esp + 4]
 		push ebx
 		push eax
 		call CreateSADXWindow_r
@@ -982,297 +962,26 @@ static __declspec(naked) void CreateSADXWindow_asm()
 	}
 }
 
-static unordered_map<unsigned char, unordered_map<int, StartPosition> > StartPositions;
-static void RegisterStartPosition(unsigned char character, const StartPosition &position)
-{
-	auto iter = StartPositions.find(character);
-	if (iter == StartPositions.end())
-	{
-		// No start positions registered for this character.
-		// Initialize it with the default start positions.
-		const StartPosition *origlist;
-		switch (character)
-		{
-		case Characters_Sonic:
-			origlist = SonicStartArray;
-			break;
-		case Characters_Tails:
-			origlist = TailsStartArray;
-			break;
-		case Characters_Knuckles:
-			origlist = KnucklesStartArray;
-			break;
-		case Characters_Amy:
-			origlist = AmyStartArray;
-			break;
-		case Characters_Gamma:
-			origlist = GammaStartArray;
-			break;
-		case Characters_Big:
-			origlist = BigStartArray;
-			break;
-		default:
-			return;
-		}
-		unordered_map<int, StartPosition> &newlist = StartPositions[character];
-		for (; origlist->LevelID != LevelIDs_Invalid; origlist++)
-		{
-			newlist[levelact(origlist->LevelID, origlist->ActID)] = *origlist;
-		}
-		// Update the start position for the specified level.
-		newlist[levelact(position.LevelID, position.ActID)] = position;
-	}
-	else
-	{
-		// Start positions have already been registered.
-		// Update the existing map.
-		iter->second[levelact(position.LevelID, position.ActID)] = position;
-	}
-}
+unordered_map<unsigned char, unordered_map<int, StartPosition>> StartPositions;
+unordered_map<unsigned char, unordered_map<int, FieldStartPosition>> FieldStartPositions;
+unordered_map<int, PathDataPtr> Paths;
+bool PathsInitialized;
+unordered_map<unsigned char, vector<PVMEntry>> CharacterPVMs;
+vector<PVMEntry> CommonObjectPVMs;
+bool CommonObjectPVMsInitialized;
+unordered_map<unsigned char, vector<TrialLevelListEntry>> _TrialLevels;
+unordered_map<unsigned char, vector<TrialLevelListEntry>> _TrialSubgames;
+const char* mainsavepath = "SAVEDATA";
+const char* chaosavepath = "SAVEDATA";
+string windowtitle;
+vector<SoundList> _SoundLists;
+vector<MusicInfo> _MusicList;
+vector<__int16> _USVoiceDurationList;
+vector<__int16> _JPVoiceDurationList;
+extern HelperFunctions helperFunctions;
+LoaderSettings loaderSettings = {};
 
-static void ClearStartPositionList(unsigned char character)
-{
-	switch (character)
-	{
-	case Characters_Sonic:
-	case Characters_Tails:
-	case Characters_Knuckles:
-	case Characters_Amy:
-	case Characters_Gamma:
-	case Characters_Big:
-		break;
-	default:
-		return;
-	}
-	StartPositions[character].clear();
-}
-
-static unordered_map<unsigned char, unordered_map<int, FieldStartPosition> > FieldStartPositions;
-static void RegisterFieldStartPosition(unsigned char character, const FieldStartPosition &position)
-{
-	if (character >= Characters_MetalSonic) return;
-	auto iter = FieldStartPositions.find(character);
-	if (iter == FieldStartPositions.end())
-	{
-		// No field start positions registered for this character.
-		// Initialize it with the default field start positions.
-		const FieldStartPosition *origlist = StartPosList_FieldReturn[character];
-		unordered_map<int, FieldStartPosition> &newlist = FieldStartPositions[character];
-		for (; origlist->LevelID != LevelIDs_Invalid; origlist++)
-		{
-			newlist[levelact(origlist->LevelID, origlist->FieldID)] = *origlist;
-		}
-		// Update the field start position for the specified level.
-		newlist[levelact(position.LevelID, position.FieldID)] = position;
-	}
-	else
-	{
-		// Field start positions have already been registered.
-		// Update the existing map.
-		iter->second[levelact(position.LevelID, position.FieldID)] = position;
-	}
-}
-
-static void ClearFieldStartPositionList(unsigned char character)
-{
-	if (character >= Characters_MetalSonic) return;
-	FieldStartPositions[character].clear();
-}
-
-static unordered_map<int, PathDataPtr> Paths;
-static bool PathsInitialized;
-static void RegisterPathList(const PathDataPtr &paths)
-{
-	if (!PathsInitialized)
-	{
-		const PathDataPtr *oldlist = PathDataPtrs;
-		for (; oldlist->LevelAct != 0xFFFF; oldlist++)
-		{
-			Paths[oldlist->LevelAct] = *oldlist;
-		}
-		PathsInitialized = true;
-	}
-	Paths[paths.LevelAct] = paths;
-}
-
-static void ClearPathListList()
-{
-	Paths.clear();
-	PathsInitialized = true;
-}
-
-static unordered_map<unsigned char, vector<PVMEntry> > CharacterPVMs;
-static void RegisterCharacterPVM(unsigned char character, const PVMEntry &pvm)
-{
-	if (character > Characters_MetalSonic) return;
-	auto iter = CharacterPVMs.find(character);
-	if (iter == CharacterPVMs.end())
-	{
-		// Character PVM vector has not been created yet.
-		// Initialize it with the texture list.
-		const PVMEntry *origlist = CharacterPVMEntries[character];
-		vector<PVMEntry> &newlist = CharacterPVMs[character];
-		for (; origlist->TexList != nullptr; origlist++)
-		{
-			newlist.push_back(*origlist);
-		}
-		// Add the new PVM.
-		newlist.push_back(pvm);
-	}
-	else
-	{
-		// Character PVM vector has been created.
-		// Add the new texture.
-		iter->second.push_back(pvm);
-	}
-}
-
-static void ClearCharacterPVMList(unsigned char character)
-{
-	if (character > Characters_MetalSonic) return;
-	CharacterPVMs[character].clear();
-}
-
-static vector<PVMEntry> CommonObjectPVMs;
-static bool CommonObjectPVMsInitialized;
-static void RegisterCommonObjectPVM(const PVMEntry &pvm)
-{
-	if (!CommonObjectPVMsInitialized)
-	{
-		const PVMEntry *oldlist = &OBJ_REGULAR_TEXLISTS[0];
-		for (; oldlist->TexList != nullptr; oldlist++)
-		{
-			CommonObjectPVMs.push_back(*oldlist);
-		}
-		CommonObjectPVMsInitialized = true;
-	}
-	CommonObjectPVMs.push_back(pvm);
-}
-
-static void ClearCommonObjectPVMList()
-{
-	CommonObjectPVMs.clear();
-	CommonObjectPVMsInitialized = true;
-}
-
-static unsigned char trialcharacters[] = { 0, 0xFFu, 1, 2, 0xFFu, 3, 5, 4, 6 };
-static inline unsigned char gettrialcharacter(unsigned char character)
-{
-	if (character >= LengthOfArray(trialcharacters))
-		return 0xFF;
-	return trialcharacters[character];
-}
-
-static unordered_map<unsigned char, vector<TrialLevelListEntry> > _TrialLevels;
-static void RegisterTrialLevel(unsigned char character, const TrialLevelListEntry &level)
-{
-	character = gettrialcharacter(character);
-	if (character == 0xFF) return;
-	auto iter = _TrialLevels.find(character);
-	if (iter == _TrialLevels.end())
-	{
-		// Trial level vector has not been registered yet.
-		// Initialize it with the standard trial level list.
-		const TrialLevelList *const origlist = &TrialLevels[character];
-		vector<TrialLevelListEntry> &newlist = _TrialLevels[character];
-		newlist.resize(origlist->Count);
-		memcpy(newlist.data(), origlist->Levels, sizeof(TrialLevelListEntry) * origlist->Count);
-		// Add the new trial level.
-		newlist.push_back(level);
-	}
-	else
-	{
-		// Trial level vector has already been created.
-		// Add the new level.
-		iter->second.push_back(level);
-	}
-}
-
-static void ClearTrialLevelList(unsigned char character)
-{
-	character = gettrialcharacter(character);
-	if (character == 0xFF) return;
-	_TrialLevels[character].clear();
-}
-
-static unordered_map<unsigned char, vector<TrialLevelListEntry> > _TrialSubgames;
-static void RegisterTrialSubgame(unsigned char character, const TrialLevelListEntry &level)
-{
-	character = gettrialcharacter(character);
-	if (character == 0xFF) return;
-	auto iter = _TrialSubgames.find(character);
-	if (iter == _TrialSubgames.end())
-	{
-		// Trial subgame vector has not been registered yet.
-		// Initialize it with the standard trial subgame list.
-		const TrialLevelList *const origlist = &TrialSubgames[character];
-		vector<TrialLevelListEntry> &newlist = _TrialSubgames[character];
-		newlist.resize(origlist->Count);
-		memcpy(newlist.data(), origlist->Levels, sizeof(TrialLevelListEntry) * origlist->Count);
-		// Add the new trial subgame.
-		newlist.push_back(level);
-	}
-	else
-	{
-		// Trial subgame vector has already been created.
-		// Add the new subgame.
-		iter->second.push_back(level);
-	}
-}
-
-static void ClearTrialSubgameList(unsigned char character)
-{
-	character = gettrialcharacter(character);
-	if (character == 0xFF) return;
-	_TrialSubgames[character].clear();
-}
-
-static const char *mainsavepath = "SAVEDATA";
-static const char *GetMainSavePath()
-{
-	return mainsavepath;
-}
-
-static const char *chaosavepath = "SAVEDATA";
-static const char *GetChaoSavePath()
-{
-	return chaosavepath;
-}
-
-const char* __cdecl GetReplaceablePath(const char* path)
-{
-	return sadx_fileMap.replaceFile(path);
-}
-
-void _ReplaceFile(const char *src, const char *dst)
-{
-	sadx_fileMap.addReplaceFile(src, dst);
-}
-
-static const HelperFunctions helperFunctions =
-{
-	ModLoaderVer,
-	&RegisterStartPosition,
-	&ClearStartPositionList,
-	&RegisterFieldStartPosition,
-	&ClearFieldStartPositionList,
-	&RegisterPathList,
-	&ClearPathListList,
-	&RegisterCharacterPVM,
-	&ClearCharacterPVMList,
-	&RegisterCommonObjectPVM,
-	&ClearCommonObjectPVMList,
-	&RegisterTrialLevel,
-	&ClearTrialLevelList,
-	&RegisterTrialSubgame,
-	&ClearTrialSubgameList,
-	&GetMainSavePath,
-	&GetChaoSavePath,
-	&GetReplaceablePath,
-	&_ReplaceFile
-};
-
-static const char *const dlldatakeys[] = {
+static const char* const dlldatakeys[] = {
 	"CHRMODELSData",
 	"ADV00MODELSData",
 	"ADV01MODELSData",
@@ -1285,89 +994,19 @@ static const char *const dlldatakeys[] = {
 	"CHAOSTGGARDEN02MR_NIGHTData"
 };
 
-void __cdecl WriteSaveFile_r()
+void __cdecl SetLanguage()
 {
-	char v0; // bl@1
-	SaveFileInfo *v2; // edi@8
-	char v3[MAX_PATH]; // esi@8
-	FILE *v5; // edi@20
-
-	v0 = 1;
-	*(char *)0x3ABDF7A = 0;
-	*(char *)0x3B291B1 = 0;
-	if (!*(int *)0x3B29198)
-	{
-		if (*(unsigned char *)0x3B291B2 > 4u)
-		{
-			*(int *)0x3B291A4 = 0;
-			*(char *)0x3B291AD = 0;
-			*(char *)0x3ABDF76 = 0;
-			*(char *)0x3B22E1E = 0;
-			*(char *)0x3B291B2 = 0;
-		}
-		CreateDirectoryA(mainsavepath, nullptr);
-		if (!*(char *)0x3B291B0)
-			SaveSave();
-		if (*(char *)0x3B291B3)
-		{
-			*(char *)0x3B291B3 = 0;
-			if ((unsigned __int8)*(char *)0x3B290E0 > 98u)
-				return;
-			v2 = SaveFiles->Next;
-			snprintf(v3, MAX_PATH, "SonicDX%02d.snc", 1);
-			if (v2)
-				while (1)
-				{
-					if (CompareStringA(9u, 1u, v3, -1, v2->Filename, -1) == 2)
-					{
-						v2 = SaveFiles->Next;
-						++v0;
-						if ((unsigned __int8)v0 > 99u)
-							return;
-						snprintf(v3, MAX_PATH, "SonicDX%02d.snc", (unsigned __int8)v0);
-					}
-					else
-						v2 = v2->Next;
-					if (!v2)
-						break;
-				}
-			if (*(char **)0x3B290DC != nullptr)
-			{
-				free(*(char **)0x3B290DC);
-				*(char **)0x3B290DC = nullptr;
-			}
-			*(char **)0x3B290DC = (char *)malloc(0xEu);
-			++*(char *)0x3B290E0;
-			*(char *)0x3B290D8 = v0;
-			snprintf(*(char **)0x3B290DC, 0xEu, "SonicDX%02d.snc", (unsigned __int8)v0);
-			snprintf(v3, MAX_PATH, "./%s/SonicDX%02d.snc", mainsavepath, (unsigned __int8)v0);
-		}
-		else
-		{
-			lstrlenA(*(char **)0x3B290DC);
-			snprintf(v3, MAX_PATH, "./%s/%s", mainsavepath, *(char **)0x3B290DC);
-		}
-		v5 = fopen(v3, "wb");
-		fwrite((void *)0x3B2B3A8, sizeof(SaveFileData), 1, v5);
-		*(char *)0x3B290E8 = 0;
-		InputThing__Ctor();
-		*(char *)0x3B291B2 = 0;
-		*(int *)0x3B291A4 = 0;
-		*(char *)0x3ABDF7A = 0;
-		*(char *)0x3B291AD = 0;
-		*(char *)0x3ABDF76 = 0;
-		*(char *)0x3B22E1E = 0;
-		fclose(v5);
-		*(char *)0x3B291B1 = 1;
-	}
+	VoiceLanguage = voiceLanguage;
+	TextLanguage = textLanguage;
 }
 
-int __cdecl FixEKey(int i)
+Bool __cdecl FixEKey(int i)
 {
-	return IsCameraControlEnabled() && GetKey(i);
+	return IsFreeCameraAllowed() == TRUE && GetKey(i) == TRUE;
 }
 
 const auto loc_794566 = (void*)0x00794566;
+
 void __declspec(naked) PolyBuff_Init_FixVBuffParams()
 {
 	__asm
@@ -1379,20 +1018,314 @@ void __declspec(naked) PolyBuff_Init_FixVBuffParams()
 	}
 }
 
+void __cdecl Direct3D_TextureFilterPoint_ForceLinear()
+{
+	Direct3D_Device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+	Direct3D_Device->SetRenderState(D3DRS_LIGHTING, 0);
+	Direct3D_Device->SetRenderState(D3DRS_DIFFUSEMATERIALSOURCE, D3DMCS_COLOR1);
+	Direct3D_Device->SetTextureStageState(0, D3DTSS_MAGFILTER, D3DTEXF_LINEAR);
+	Direct3D_Device->SetTextureStageState(0, D3DTSS_MINFILTER, D3DTEXF_LINEAR);
+	Direct3D_Device->SetTextureStageState(0, D3DTSS_MIPFILTER, D3DTEXF_LINEAR);
+}
+
+void __cdecl SetPreferredFilterOption()
+{
+	if (textureFilter == true)
+	{
+		Direct3D_TextureFilterPoint_ForceLinear();
+	}
+	else
+	{
+		Direct3D_TextureFilterPoint();
+	}
+}
+
+void __cdecl Direct3D_EnableHudAlpha_Point(bool enable)
+{
+	Direct3D_EnableHudAlpha(enable);
+	Direct3D_TextureFilterPoint();
+}
+
+void __cdecl njDrawTextureMemList_NoFilter(NJS_TEXTURE_VTX* polygons, Int count, Uint32 gbix, Int flag)
+{
+	njAlphaMode(flag);
+	Direct3D_TextureFilterPoint();
+	njSetTextureNumG(gbix);
+	if (uiscale::is_scale_enabled() == true) uiscale::scale_texmemlist(polygons, count);
+	DrawRect_TextureVertexTriangleStrip(polygons, count);
+	Direct3D_TextureFilterLinear();
+}
+
+void __cdecl FixLandTableLightType()
+{
+	Direct3D_PerformLighting(0);
+}
+
+void __cdecl PreserveLightType(int a1)
+{
+	Direct3D_PerformLighting(a1 * 2); // Bitwise shift left
+}
+
+void ProcessVoiceDurationRegisters()
+{
+	if (!_USVoiceDurationList.empty())
+	{
+		auto size = _USVoiceDurationList.size();
+		auto newlist = new __int16[size];
+		memcpy(newlist, _USVoiceDurationList.data(), sizeof(__int16) * size);
+		WriteData((__int16**)0x4255A2, newlist);
+	}
+
+	if (!_JPVoiceDurationList.empty())
+	{
+		auto size = _JPVoiceDurationList.size();
+		auto newlist = new __int16[size];
+		memcpy(newlist, _JPVoiceDurationList.data(), sizeof(__int16) * size);
+		WriteData((__int16**)0x42552F, newlist);
+	}
+
+	_USVoiceDurationList.clear();
+	_JPVoiceDurationList.clear();
+}
+
+//Following order for the BASS dlls is REALLY important, NEVER touch it or BASS will FAIL to load.
+const std::wstring bassDLLs[] =
+{
+	L"bass.dll",
+	L"libatrac9.dll",
+	L"libcelt-0061.dll",
+	L"libcelt-0110.dll",
+	L"libg719_decode.dll",
+	L"libmpg123-0.dll",
+	L"libspeex-1.dll",
+	L"libvorbis.dll",
+	L"avutil-vgmstream-57.dll",
+	L"avcodec-vgmstream-59.dll",
+	L"avformat-vgmstream-59.dll",
+	L"jansson.dll",
+	L"swresample-vgmstream-4.dll",
+	L"bass_vgmstream.dll",
+};
+
+static void __cdecl InitAudio()
+{
+
+	if (loaderSettings.EnableBassMusic || !Exists("system\\sounddata\\bgm"))
+	{
+		wstring bassFolder = extLibPath + L"BASS\\";
+
+		if (!FileExists(bassFolder + L"bass.dll"))
+			bassFolder = L"BASS\\";
+
+		bool bassDLL = false;
+
+		for (uint8_t i = 0; i < LengthOfArray(bassDLLs); i++)
+		{
+			wstring fullPath = bassFolder + bassDLLs[i];
+			bassDLL = LoadLibrary(fullPath.c_str());
+		}
+
+		if (bassDLL)
+		{
+			WriteCall((void*)0x42544C, PlayMusicFile_r);
+			WriteCall((void*)0x4254F4, PlayVoiceFile_r);
+			WriteCall((void*)0x425569, PlayVoiceFile_r);
+			WriteCall((void*)0x513187, PlayVideoFile_r);
+			WriteCall((void*)0x425488, PlayMusicFile_CD_r);
+			WriteCall((void*)0x425591, PlayVoiceFile_CD_r);
+			WriteCall((void*)0x42551D, PlayVoiceFile_CD_r);
+			WriteJump((void*)0x40D1EA, WMPInit_r);
+			WriteJump((void*)0x40CF50, WMPRestartMusic_r);
+			WriteJump((void*)0x40D060, PauseMusic_r);
+			WriteJump((void*)0x40D0A0, ResumeMusic_r);
+			WriteJump((void*)0x40CFF0, WMPClose_r);
+			WriteJump((void*)0x40D28A, WMPRelease_r);
+			WriteJump((void*)0x40CF20, sub_40CF20_r);
+			PrintDebug("Loaded Bass DLLs dependencies\n");
+		}
+		else
+		{
+			PrintDebug("Failed to load bass DLL dependencies\n");
+		}
+	}
+
+	if (loaderSettings.HRTFSound)
+	{
+		// allow HRTF 3D sound
+		WriteData<uint8_t>(reinterpret_cast<uint8_t*>(0x00402773), 0xEBu);
+	}
+}
+
+void InitPatches()
+{
+	//Fix the game not saving camera setting properly 
+	if (loaderSettings.CCEF)
+	{
+		WriteData((int16_t*)0x438330, (int16_t)0x0D81);
+		WriteData((int16_t*)0x434870, (int16_t)0x0D81);
+	}
+
+	// Fixes N-sided polygons (Gamma's headlight) by using
+	// triangle strip vertex buffer initializers.
+
+	if (loaderSettings.E102PolyFix)
+	{
+		for (size_t i = 0; i < MeshSetInitFunctions.size(); ++i)
+		{
+			auto& a = MeshSetInitFunctions[i];
+			a[NJD_MESHSET_N >> 14] = a[NJD_MESHSET_TRIMESH >> 14];
+		}
+
+		for (size_t i = 0; i < PolyBuffDraw_VertexColor.size(); ++i)
+		{
+			auto& a = PolyBuffDraw_VertexColor[i];
+			a[NJD_MESHSET_N >> 14] = a[NJD_MESHSET_TRIMESH >> 14];
+		}
+
+		for (size_t i = 0; i < PolyBuffDraw_NoVertexColor.size(); ++i)
+		{
+			auto& a = PolyBuffDraw_NoVertexColor[i];
+			a[NJD_MESHSET_N >> 14] = a[NJD_MESHSET_TRIMESH >> 14];
+		}
+	}
+
+	if (loaderSettings.PixelOffsetFix)
+	{
+		// Replaces half-pixel offset addition with subtraction
+		WriteData((uint8_t*)0x0077DE1E, (uint8_t)0x25); // njDrawQuadTextureEx
+		WriteData((uint8_t*)0x0077DE33, (uint8_t)0x25); // njDrawQuadTextureEx
+		WriteData((uint8_t*)0x0078E822, (uint8_t)0x25); // DrawRect_TextureVertexTriangleStrip
+		WriteData((uint8_t*)0x0078E83C, (uint8_t)0x25); // DrawRect_TextureVertexTriangleStrip
+		WriteData((uint8_t*)0x0078E991, (uint8_t)0x25); // njDrawTriangle2D_List
+		WriteData((uint8_t*)0x0078E9AE, (uint8_t)0x25); // njDrawTriangle2D_List
+		WriteData((uint8_t*)0x0078EA41, (uint8_t)0x25); // Direct3D_DrawTriangleFan2D
+		WriteData((uint8_t*)0x0078EA5E, (uint8_t)0x25); // Direct3D_DrawTriangleFan2D
+		WriteData((uint8_t*)0x0078EAE1, (uint8_t)0x25); // njDrawTriangle2D_Strip
+		WriteData((uint8_t*)0x0078EAFE, (uint8_t)0x25); // njDrawTriangle2D_Strip
+		WriteData((uint8_t*)0x0077DBFC, (uint8_t)0x25); // njDrawPolygon
+		WriteData((uint8_t*)0x0077DC16, (uint8_t)0x25); // njDrawPolygon
+		WriteData((uint8_t*)0x0078E8F1, (uint8_t)0x25); // njDrawLine2D_Direct3D
+		WriteData((uint8_t*)0x0078E90E, (uint8_t)0x25); // njDrawLine2D_Direct3D
+	}
+
+	if (loaderSettings.ChaoPanelFix)
+	{
+		// Chao stat panel screen dimensions fix
+		WriteData((float**)0x007377FE, (float*)&_nj_screen_.w);
+	}
+
+	if (loaderSettings.LightFix)
+	{
+		// Fix light incorrectly being applied on LandTables
+		WriteCall(reinterpret_cast<void*>(0x0043A6D5), FixLandTableLightType);
+
+		// Enable light type preservation in the draw queue
+		WriteCall(reinterpret_cast<void*>(0x004088B1), PreserveLightType);
+
+		// Do not reset light type for queued models
+		WriteData<2>(reinterpret_cast<void*>(0x004088A6), 0x90i8);
+	}
+
+	if (loaderSettings.NodeLimit)
+		IncreaseNodeLimit();
+
+	if (loaderSettings.ChunkSpecFix)
+		ChunkSpecularFix_Init();
+
+
+	if (loaderSettings.KillGbix)
+		Init_NOGbixHack();
+}
+
+
+static vector<string>& split(const string& s, char delim, vector<string>& elems)
+{
+	std::stringstream ss(s);
+	string item;
+
+	while (std::getline(ss, item, delim))
+	{
+		elems.push_back(item);
+	}
+
+	return elems;
+}
+
+
+static vector<string> split(const string& s, char delim)
+{
+	vector<string> elems;
+	split(s, delim, elems);
+	return elems;
+}
+
+static string trim(const string& s)
+{
+	auto st = s.find_first_not_of(' ');
+
+	if (st == string::npos)
+	{
+		st = 0;
+	}
+
+	auto ed = s.find_last_not_of(' ');
+
+	if (ed == string::npos)
+	{
+		ed = s.size() - 1;
+	}
+
+	return s.substr(st, (ed + 1) - st);
+}
+
+static const unordered_map<string, uint8_t> charnamemap = {
+	{ "sonic",    Characters_Sonic },
+	{ "eggman",   Characters_Eggman },
+	{ "tails",    Characters_Tails },
+	{ "knuckles", Characters_Knuckles },
+	{ "tikal",    Characters_Tikal },
+	{ "amy",      Characters_Amy },
+	{ "gamma",    Characters_Gamma },
+	{ "big",      Characters_Big }
+};
+
+static uint8_t ParseCharacter(const string& str)
+{
+	string str2 = trim(str);
+	transform(str2.begin(), str2.end(), str2.begin(), ::tolower);
+	auto ch = charnamemap.find(str2);
+	if (ch != charnamemap.end())
+		return ch->second;
+	else
+		return (uint8_t)strtol(str.c_str(), nullptr, 10);
+}
+extern void RegisterCharacterWelds(const uint8_t character, const char* iniPath);
+
+
+std::vector<Mod> modlist;
+
+bool IsWindowsVistaOrGreater()
+{
+	// Taken from https://stackoverflow.com/questions/1963992/check-windows-version
+	OSVERSIONINFOEXW osvi = {};
+	osvi.dwOSVersionInfoSize = sizeof(osvi);
+	DWORDLONG const dwlConditionMask = VerSetConditionMask(
+		VerSetConditionMask(
+			VerSetConditionMask(
+				0, VER_MAJORVERSION, VER_GREATER_EQUAL),
+			VER_MINORVERSION, VER_GREATER_EQUAL),
+		VER_SERVICEPACKMAJOR, VER_GREATER_EQUAL);
+	osvi.dwMajorVersion = HIBYTE(_WIN32_WINNT_VISTA);
+	osvi.dwMinorVersion = LOBYTE(_WIN32_WINNT_VISTA);
+	osvi.wServicePackMajor = 0;
+
+	return VerifyVersionInfoW(&osvi, VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR, dwlConditionMask) != FALSE;
+}
+
 static void __cdecl InitMods()
 {
 	// Hook present function to handle device lost/reset states
-	WriteJump(Direct3D_Present, Direct3D_Present_r);
-	WriteJump((void*)0x00794000, CreateDirect3DDevice_r);
-
-	FILE *f_ini = _wfopen(L"mods\\SADXModLoader.ini", L"r");
-	if (!f_ini)
-	{
-		MessageBox(nullptr, L"mods\\SADXModLoader.ini could not be read!", L"SADX Mod Loader", MB_ICONWARNING);
-		return;
-	}
-	unique_ptr<IniFile> ini(new IniFile(f_ini));
-	fclose(f_ini);
+	direct3d::init();
 
 	// Get sonic.exe's path and filename.
 	wchar_t pathbuf[MAX_PATH];
@@ -1410,10 +1343,115 @@ static void __cdecl InitMods()
 	// Convert the EXE filename to lowercase.
 	transform(exefilename.begin(), exefilename.end(), exefilename.begin(), ::towlower);
 
-	// Process the main Mod Loader settings.
-	const IniGroup *settings = ini->getGroup("");
+	// Get path for Mod Manager settings and libraries
+	SetAppPathConfig(exepath);
 
-	if (settings->getBool("DebugConsole"))
+	// Load profiles JSON file
+	std::ifstream ifs(appPath + L"\\SADX\\Profiles.json");
+	json json_profiles = json::parse(ifs);
+	ifs.close();
+	
+	// Get current profile index
+	int ind_profile = json_profiles.value("ProfileIndex", 0);
+
+	// Get current profile filename
+	json proflist = json_profiles["ProfilesList"];
+	std::string profname = proflist.at(ind_profile)["Filename"];
+
+	// Convert profile name from UTF8 stored in JSON to wide string
+	int count = MultiByteToWideChar(CP_UTF8, 0, profname.c_str(), profname.length(), NULL, 0);
+	std::wstring profname_w(count, 0);
+	MultiByteToWideChar(CP_UTF8, 0, profname.c_str(), profname.length(), &profname_w[0], count);
+
+	// Load the current profile
+	std::ifstream ifs_p(appPath + L"\\SADX\\" + profname_w);
+	json json_config = json::parse(ifs_p);
+	int setver = json_config.value("SettingsVersion", 0);
+
+	// Graphics settings
+	json json_graphics = json_config["Graphics"];
+	loaderSettings.ScreenNum = json_graphics.value("SelectedScreen", 0);
+	loaderSettings.HorizontalResolution = json_graphics.value("HorizontalResolution", 640);
+	loaderSettings.VerticalResolution = json_graphics.value("VerticalResolution", 480);
+	loaderSettings.ForceAspectRatio = json_graphics.value("Enable43ResolutionRatio", false);
+	loaderSettings.EnableVsync = json_graphics.value("EnableVsync", true);
+	loaderSettings.PauseWhenInactive = json_graphics.value("EnablePauseOnInactive", true);
+	loaderSettings.WindowedFullscreen = json_graphics.value("EnableBorderless", true);
+	loaderSettings.StretchFullscreen = json_graphics.value("EnableScreenScaling", true);
+	loaderSettings.CustomWindowSize = json_graphics.value("EnableCustomWindow", false);
+	loaderSettings.WindowWidth = json_graphics.value("CustomWindowWidth", 640);
+	loaderSettings.WindowHeight = json_graphics.value("CustomWindowHeight", 480);
+	loaderSettings.MaintainWindowAspectRatio = json_graphics.value("EnableKeepResolutionRatio", false);
+	loaderSettings.ResizableWindow = json_graphics.value("EnableResizableWindow", true);
+	loaderSettings.BackgroundFillMode = json_graphics.value("FillModeBackground", 2);
+	loaderSettings.FmvFillMode = json_graphics.value("FillModeFMV", 1);
+	// ModeTextureFiltering ?
+	// ModeUIFiltering ?
+	loaderSettings.ScaleHud = json_graphics.value("EnableUIScaling", true);
+	loaderSettings.AutoMipmap = json_graphics.value("EnableForcedMipmapping", true);
+	loaderSettings.TextureFilter = json_graphics.value("EnableForcedTextureFilter", true);
+	
+	// Controller settings
+	json json_controller = json_config["Controller"];
+	loaderSettings.InputMod = json_controller.value("EnabledInputMod", true);
+
+	// Sound settings
+	json json_sound = json_config["Sound"];
+	loaderSettings.EnableBassMusic = json_sound.value("EnableBassMusic", true);
+	loaderSettings.EnableBassSFX = json_sound.value("EnableBassSFX", true);	
+	loaderSettings.SEVolume = json_sound.value("SEVolume", 100);
+
+	// Test Spawn settings
+	json json_testspawn = json_config["TestSpawn"];
+	// UseCharacter?
+	// UseLevel?
+	// UseEvent?
+	// UseGameMode?
+	// UseSave?
+	loaderSettings.TestSpawnLevel = json_testspawn.value("CharacterIndex", 0);
+	loaderSettings.TestSpawnAct = json_testspawn.value("CharacterIndex", 0);
+	loaderSettings.TestSpawnCharacter = json_testspawn.value("CharacterIndex", 0);
+	loaderSettings.TestSpawnEvent = json_testspawn.value("EventIndex", 0);
+	loaderSettings.TestSpawnGameMode = json_testspawn.value("GameModeIndex", 0);
+	loaderSettings.TestSpawnSaveID = json_testspawn.value("SaveIndex", 0);
+	loaderSettings.TextLanguage = json_testspawn.value("GameTextLanguage", 1);
+	loaderSettings.VoiceLanguage = json_testspawn.value("GameVoiceLanguage", 1);
+	// UseManual ?
+	loaderSettings.TestSpawnPositionEnabled = json_testspawn.value("UsePosition", false);
+	loaderSettings.TestSpawnX = json_testspawn.value("XPosition", 0);
+	loaderSettings.TestSpawnY = json_testspawn.value("YPosition", 0);
+	loaderSettings.TestSpawnZ = json_testspawn.value("ZPosition", 0);
+	loaderSettings.TestSpawnRotation = json_testspawn.value("Rotation", 0);
+	
+	// Patches settings
+	json json_patches = json_config["Patches"];
+	loaderSettings.HRTFSound = json_patches.value("HRTFSound", false);
+	loaderSettings.CCEF = json_patches.value("KeepCamSettings", true);
+	loaderSettings.PolyBuff = json_patches.value("FixVertexColorRendering", true);
+	loaderSettings.MaterialColorFix = json_patches.value("MaterialColorFix", true);
+	loaderSettings.NodeLimit = json_patches.value("NodeLimit", true);
+	loaderSettings.FovFix = json_patches.value("FOVFix", true);
+	loaderSettings.SCFix = json_patches.value("SkyChaseResolutionFix", true);
+	loaderSettings.Chaos2CrashFix = json_patches.value("Chaos2CrashFix", true);
+	loaderSettings.ChunkSpecFix = json_patches.value("ChunkSpecularFix", true);
+	loaderSettings.E102PolyFix = json_patches.value("E102NGonFix", true);
+	loaderSettings.ChaoPanelFix = json_patches.value("ChaoPanelFix", true);
+	loaderSettings.PixelOffsetFix = json_patches.value("PixelOffSetFix", true);
+	loaderSettings.LightFix = json_patches.value("LightFix", true);
+	loaderSettings.KillGbix = json_patches.value("KillGBIX", false);
+	loaderSettings.DisableCDCheck = json_patches.value("DisableCDCheck", true);
+	loaderSettings.ExtendedSaveSupport = json_patches.value("ExtendedSaveSupport", true);
+
+	// Debug settings
+	json json_debug = json_config["DebugSettings"];
+	loaderSettings.DebugConsole = json_debug.value("EnableDebugConsole", false);
+	loaderSettings.DebugScreen = json_debug.value("EnableDebugScreen", false);
+	loaderSettings.DebugFile = json_debug.value("EnableDebugFile", false);
+	loaderSettings.DebugCrashLog = json_debug.value("EnableDebugCrashLog", true);
+	// EnableShowConsole ?
+
+	// Process the main Mod Loader settings.
+	if (loaderSettings.DebugConsole)
 	{
 		// Enable the debug console.
 		// TODO: setvbuf()?
@@ -1423,8 +1461,8 @@ static void __cdecl InitMods()
 		dbgConsole = true;
 	}
 
-	dbgScreen = settings->getBool("DebugScreen");
-	if (settings->getBool("DebugFile"))
+	dbgScreen = loaderSettings.DebugScreen;
+	if (loaderSettings.DebugFile)
 	{
 		// Enable debug logging to a file.
 		// dbgFile will be nullptr if the file couldn't be opened.
@@ -1434,9 +1472,11 @@ static void __cdecl InitMods()
 	// Is any debug method enabled?
 	if (dbgConsole || dbgScreen || dbgFile)
 	{
-		WriteJump((void *)PrintDebug, (void *)SADXDebugOutput);
+		WriteJump((void*)PrintDebug, (void*)SADXDebugOutput);
+
 		PrintDebug("SADX Mod Loader v" VERSION_STRING " (API version %d), built " __TIMESTAMP__ "\n",
 			ModLoaderVer);
+
 #ifdef MODLOADER_GIT_VERSION
 #ifdef MODLOADER_GIT_DESCRIBE
 		PrintDebug("%s, %s\n", MODLOADER_GIT_VERSION, MODLOADER_GIT_DESCRIBE);
@@ -1446,37 +1486,48 @@ static void __cdecl InitMods()
 #endif /* MODLOADER_GIT_VERSION */
 	}
 
-	WriteJump((void *)0x789E50, CreateSADXWindow_asm); // override window creation function
+	// Set process DPI awareness for window resize on Vista and above
+	if (IsWindowsVistaOrGreater())
+	{
+		if (!SetProcessDPIAware())
+			PrintDebug("Unable to set process DPI awareness.\n");
+	}
+
+	WriteJump((void*)0x789E50, CreateSADXWindow_asm); // override window creation function
 	// Other various settings.
-	if (settings->getBool("DisableCDCheck"))
-		WriteJump((void *)0x402621, (void *)0x402664);
+	if (loaderSettings.DisableCDCheck)
+		WriteJump((void*)0x402621, (void*)0x402664);
 
 	// Custom resolution.
-	WriteJump((void *)0x40297A, (void *)0x402A90);
+	WriteJump((void*)0x40297A, (void*)0x402A90);
 
-	int hres = settings->getInt("HorizontalResolution", 640);
+	int hres = loaderSettings.HorizontalResolution;
 	if (hres > 0)
 	{
 		HorizontalResolution = hres;
-		HorizontalStretch = HorizontalResolution / 640.0f;
+		HorizontalStretch = static_cast<float>(HorizontalResolution) / 640.0f;
 	}
 
-	int vres = settings->getInt("VerticalResolution", 480);
+	int vres = loaderSettings.VerticalResolution;
 	if (vres > 0)
 	{
 		VerticalResolution = vres;
-		VerticalStretch = VerticalResolution / 480.0f;
+		VerticalStretch = static_cast<float>(VerticalResolution) / 480.0f;
 	}
 
-	fov::initialize();
+	if (loaderSettings.FovFix)
+		fov::initialize();
 
-	borderlessWindow   = settings->getBool("WindowedFullscreen");
-	scaleScreen        = settings->getBool("StretchFullscreen", true);
-	screenNum          = settings->getInt("ScreenNum", 1);
-	customWindowSize   = settings->getBool("CustomWindowSize");
-	customWindowWidth  = settings->getInt("WindowWidth", 640);
-	customWindowHeight = settings->getInt("WindowHeight", 480);
-	windowResize       = settings->getBool("ResizableWindow") && !customWindowSize;
+	voiceLanguage = loaderSettings.VoiceLanguage;
+	textLanguage = loaderSettings.TextLanguage;
+	borderlessWindow = loaderSettings.WindowedFullscreen;
+	scaleScreen = loaderSettings.StretchFullscreen;
+	screenNum = loaderSettings.ScreenNum;
+	customWindowSize = loaderSettings.CustomWindowSize;
+	customWindowWidth = loaderSettings.WindowWidth;
+	customWindowHeight = loaderSettings.WindowHeight;
+	windowResize = loaderSettings.ResizableWindow && !customWindowSize;
+	textureFilter = loaderSettings.TextureFilter;
 
 	if (!borderlessWindow)
 	{
@@ -1499,59 +1550,28 @@ static void __cdecl InitMods()
 		WriteJump((void*)0x0079455F, PolyBuff_Init_FixVBuffParams);
 	}
 
-	if (!settings->getBool("PauseWhenInactive", true))
-		WriteData((uint8_t *)0x401914, (uint8_t)0xEBu);
+	pauseWhenInactive = loaderSettings.PauseWhenInactive;
+	if (!pauseWhenInactive)
+	{
+		WriteData((uint8_t*)0x00401914, (uint8_t)0xEBu);
+		// Don't pause music and sounds when the window is inactive
+		WriteData<5>(reinterpret_cast<void*>(0x00401939), 0x90u);
+		WriteData<5>(reinterpret_cast<void*>(0x00401920), 0x90u);
+	}
 
-	if (settings->getBool("AutoMipmap", true))
+	if (loaderSettings.AutoMipmap)
 		mipmap::enable_auto_mipmaps();
 
 	// Hijack a ton of functions in SADX.
-	*(void **)0x38A5DB8 = (void *)0x38A5D94; // depth buffer fix
-	WriteCall((void *)0x437547, FixEKey);
-	WriteCall((void *)0x42544C, (void *)PlayMusicFile_r);
-	WriteCall((void *)0x4254F4, (void *)PlayVoiceFile_r);
-	WriteCall((void *)0x425569, (void *)PlayVoiceFile_r);
-	WriteCall((void *)0x513187, (void *)PlayVideoFile_r);
-	WriteJump((void *)0x40D1EA, (void *)WMPInit_r);
-	WriteJump((void *)0x40CF50, (void *)WMPRestartMusic_r);
-	WriteJump((void *)0x40D060, (void *)PauseSound_r);
-	WriteJump((void *)0x40D0A0, (void *)ResumeSound_r);
-	WriteJump((void *)0x40CFF0, (void *)WMPClose_r);
-	WriteJump((void *)0x40D28A, (void *)WMPRelease_r);
+	*(void**)0x38A5DB8 = (void*)0x38A5D94; // depth buffer fix
+	WriteCall((void*)0x402614, SetLanguage);
+	WriteCall((void*)0x437547, FixEKey);
+
+	InitAudio();
+
 	WriteJump(LoadSoundList, LoadSoundList_r);
 
-	// Fixes N-sided polygons (Gamma's headlight) by using
-	// triangle strip vertex buffer initializers.
-
-	for (int i = 0; i < MeshSetInitFunctions_Length; ++i)
-	{
-		auto& a = MeshSetInitFunctions[i];
-		a[NJD_MESHSET_N >> 14] = a[NJD_MESHSET_TRIMESH >> 14];
-	}
-
-	for (int i = 0; i < PolyBuffDraw_VertexColor_Length; ++i)
-	{
-		auto& a = PolyBuffDraw_VertexColor[i];
-		a[NJD_MESHSET_N >> 14] = a[NJD_MESHSET_TRIMESH >> 14];
-	}
-
-	for (int i = 0; i < PolyBuffDraw_NoVertexColor_Length; ++i)
-	{
-		auto& a = PolyBuffDraw_NoVertexColor[i];
-		a[NJD_MESHSET_N >> 14] = a[NJD_MESHSET_TRIMESH >> 14];
-	}
-
-	// Replaces half-pixel offset addition with subtraction
-	WriteData((uint8_t*)0x0077DE1E, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0077DE33, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0078E822, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0078E83C, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0078E991, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0078E9AE, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0078EA41, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0078EA5E, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0078EAE1, (uint8_t)0x25);
-	WriteData((uint8_t*)0x0078EAFE, (uint8_t)0x25);
+	InitPatches();
 
 	texpack::init();
 
@@ -1559,37 +1579,67 @@ static void __cdecl InitMods()
 	SetRDataWriteProtection(false);
 
 	// Enables GUI texture filtering (D3DTEXF_POINT -> D3DTEXF_LINEAR)
-	if (settings->getBool("TextureFilter", true))
+	if (textureFilter == true)
 	{
-		WriteData((uint8_t*)0x0078B7C4, (uint8_t)0x02);
-		WriteData((uint8_t*)0x0078B7D8, (uint8_t)0x02);
-		WriteData((uint8_t*)0x0078B7EC, (uint8_t)0x02);
+		WriteCall(reinterpret_cast<void*>(0x77DBCA), Direct3D_TextureFilterPoint_ForceLinear); //njDrawPolygon
+		WriteCall(reinterpret_cast<void*>(0x77DC79), Direct3D_TextureFilterPoint_ForceLinear); //njDrawTextureMemList
+		WriteCall(reinterpret_cast<void*>(0x77DD99), Direct3D_TextureFilterPoint_ForceLinear); //Direct3D_EnableHudAlpha
+		WriteCall(reinterpret_cast<void*>(0x77DFA0), Direct3D_TextureFilterPoint_ForceLinear); //njDrawLine2D
+		WriteCall(reinterpret_cast<void*>(0x77E032), Direct3D_TextureFilterPoint_ForceLinear); //njDrawCircle2D (?)
+		WriteCall(reinterpret_cast<void*>(0x77EA7E), Direct3D_TextureFilterPoint_ForceLinear); //njDrawTriangle2D
+		WriteCall(reinterpret_cast<void*>(0x78B074), Direct3D_TextureFilterPoint_ForceLinear); //DrawChaoHudThingB
+		WriteCall(reinterpret_cast<void*>(0x78B2F4), Direct3D_TextureFilterPoint_ForceLinear); //Some other Chao thing
+		WriteCall(reinterpret_cast<void*>(0x78B4C0), Direct3D_TextureFilterPoint_ForceLinear); //DisplayDebugShape_
+		WriteCall(reinterpret_cast<void*>(0x793CDD), Direct3D_EnableHudAlpha_Point); // Debug text still uses point filtering
+		WriteCall(reinterpret_cast<void*>(0x6FE9F8), njDrawTextureMemList_NoFilter); // Emulator plane shouldn't be filtered
 	}
 
-	vsync = settings->getBool("EnableVsync", true);
+	direct3d::set_vsync(loaderSettings.EnableVsync);
 
-	if (settings->getBool("ScaleHud", false))
+	if (loaderSettings.ScaleHud)
 	{
 		uiscale::initialize();
+		hudscale::initialize();
 	}
 
-	int bgFill = settings->getInt("BackgroundFillMode", uiscale::FillMode::fill);
+	int bgFill = loaderSettings.BackgroundFillMode;
 	if (bgFill >= 0 && bgFill <= 3)
 	{
 		uiscale::bg_fill = static_cast<uiscale::FillMode>(bgFill);
 		uiscale::setup_background_scale();
+		bgscale::initialize();
 	}
 
-	int fmvFill = settings->getInt("FmvFillMode", uiscale::FillMode::fit);
+	int fmvFill = loaderSettings.FmvFillMode;
 	if (fmvFill >= 0 && fmvFill <= 3)
 	{
 		uiscale::fmv_fill = static_cast<uiscale::FillMode>(fmvFill);
 		uiscale::setup_fmv_scale();
 	}
 
+	// This is different from the rewrite portion of the polybuff namespace!
+		polybuff::init();
+
+	if (loaderSettings.PolyBuff)
+		polybuff::rewrite_init();
+
+	if (loaderSettings.DebugCrashLog)
+		initCrashDump();
+
+	if (loaderSettings.MaterialColorFix)
+		MaterialColorFixes_Init();
+
+	if (loaderSettings.EnableBassSFX || !Exists("system\\sounddata\\se"))
+		Sound_Init(loaderSettings.SEVolume);
+
+	//init interpol fix for helperfunctions
+	interpolation::init();
 	sadx_fileMap.scanSoundFolder("system\\sounddata\\bgm\\wma");
 	sadx_fileMap.scanSoundFolder("system\\sounddata\\voice_jp\\wma");
 	sadx_fileMap.scanSoundFolder("system\\sounddata\\voice_us\\wma");
+
+	if (loaderSettings.Chaos2CrashFix)
+		MinorPatches_Init();
 
 	// Map of files to replace.
 	// This is done with a second map instead of sadx_fileMap directly
@@ -1598,40 +1648,82 @@ static void __cdecl InitMods()
 	vector<std::pair<string, string>> fileswaps;
 
 	vector<std::pair<ModInitFunc, string>> initfuncs;
-	vector<std::pair<string, string>> errors;
+	vector<std::pair<wstring, wstring>> errors;
 
-	string _mainsavepath, _chaosavepath, windowtitle;
+	string _mainsavepath, _chaosavepath;
+
+	bool use_redirection = false; // Check whether save redirection is used by any mods
 
 	// It's mod loading time!
 	PrintDebug("Loading mods...\n");
+	// Mod list
+	json json_mods = json_config["EnabledMods"];
 	for (unsigned int i = 1; i <= 999; i++)
 	{
-		char key[8];
-		snprintf(key, sizeof(key), "Mod%u", i);
-		if (!settings->hasKey(key))
+		if (i > json_mods.size())
 			break;
+		std::string mod_fname = json_mods.at(i - 1);
 
-		const string mod_dirA = "mods\\" + settings->getString(key);
-		const wstring mod_dir = L"mods\\" + settings->getWString(key);
+		int count_m = MultiByteToWideChar(CP_UTF8, 0, mod_fname.c_str(), mod_fname.length(), NULL, 0);
+		std::wstring mod_fname_w(count_m, 0);
+		MultiByteToWideChar(CP_UTF8, 0, mod_fname.c_str(), mod_fname.length(), &mod_fname_w[0], count_m);
+
+		const string mod_dirA = "mods\\" + mod_fname;
+		const wstring mod_dir = L"mods\\" + mod_fname_w;
 		const wstring mod_inifile = mod_dir + L"\\mod.ini";
-		FILE *f_mod_ini = _wfopen(mod_inifile.c_str(), L"r");
+
+		FILE* f_mod_ini = _wfopen(mod_inifile.c_str(), L"r");
+		
 		if (!f_mod_ini)
 		{
-			PrintDebug("Could not open file mod.ini in \"mods\\%s\".\n", mod_dirA.c_str());
-			errors.emplace_back(mod_dirA, "mod.ini missing");
+			PrintDebug("Could not open file mod.ini in \"%s\".\n", mod_dirA.c_str());
+			errors.emplace_back(mod_dir, L"mod.ini missing");
 			continue;
 		}
 		unique_ptr<IniFile> ini_mod(new IniFile(f_mod_ini));
 		fclose(f_mod_ini);
 
-		const IniGroup *const modinfo = ini_mod->getGroup("");
+		const IniGroup* const modinfo = ini_mod->getGroup("");
+
 		const string mod_nameA = modinfo->getString("Name");
 		const wstring mod_name = modinfo->getWString("Name");
+
 		PrintDebug("%u. %s\n", i, mod_nameA.c_str());
+
+		vector<ModDependency> moddeps;
+
+		for (unsigned int j = 1; j <= 999; j++)
+		{
+			char key2[14];
+			snprintf(key2, sizeof(key2), "Dependency%u", j);
+			if (!modinfo->hasKey(key2))
+				break;
+			auto dep = split(modinfo->getString(key2), '|');
+			moddeps.push_back({ strdup(dep[0].c_str()), strdup(dep[1].c_str()), strdup(dep[2].c_str()), strdup(dep[3].c_str()) });
+		}
+
+		ModDependency* deparr = new ModDependency[moddeps.size()];
+		memcpy(deparr, moddeps.data(), moddeps.size() * sizeof(ModDependency));
+
+		Mod modinf = {
+			strdup(mod_nameA.c_str()),
+			strdup(modinfo->getString("Author").c_str()),
+			strdup(modinfo->getString("Description").c_str()),
+			strdup(modinfo->getString("Version").c_str()),
+			strdup(mod_dirA.c_str()),
+			strdup(modinfo->getString("ModID", mod_dirA).c_str()),
+			NULL,
+			modinfo->getBool("RedirectMainSave"),
+			modinfo->getBool("RedirectChaoSave"),
+			{
+				deparr,
+				(int)moddeps.size()
+			}
+		};
 
 		if (ini_mod->hasGroup("IgnoreFiles"))
 		{
-			const IniGroup *group = ini_mod->getGroup("IgnoreFiles");
+			const IniGroup* group = ini_mod->getGroup("IgnoreFiles");
 			auto data = group->data();
 			for (const auto& iter : *data)
 			{
@@ -1642,7 +1734,7 @@ static void __cdecl InitMods()
 
 		if (ini_mod->hasGroup("ReplaceFiles"))
 		{
-			const IniGroup *group = ini_mod->getGroup("ReplaceFiles");
+			const IniGroup* group = ini_mod->getGroup("ReplaceFiles");
 			auto data = group->data();
 			for (const auto& iter : *data)
 			{
@@ -1653,13 +1745,21 @@ static void __cdecl InitMods()
 
 		if (ini_mod->hasGroup("SwapFiles"))
 		{
-			const IniGroup *group = ini_mod->getGroup("SwapFiles");
+			const IniGroup* group = ini_mod->getGroup("SwapFiles");
 			auto data = group->data();
 			for (const auto& iter : *data)
 			{
 				fileswaps.emplace_back(FileMap::normalizePath(iter.first),
 					FileMap::normalizePath(iter.second));
 			}
+		}
+
+		if (ini_mod->hasGroup("CharacterWelds"))
+		{
+			const IniGroup* group = ini_mod->getGroup("CharacterWelds");
+			auto data = group->data();
+			for (const auto& iter : *data)
+				RegisterCharacterWelds(ParseCharacter(iter.first), (mod_dirA + "\\" + iter.second).c_str());
 		}
 
 		// Check for SYSTEM replacements.
@@ -1671,6 +1771,10 @@ static void __cdecl InitMods()
 		const string modTexDir = mod_dirA + "\\textures";
 		if (DirectoryExists(modTexDir))
 			sadx_fileMap.scanTextureFolder(modTexDir, i);
+
+		const string modRepTexDir = mod_dirA + "\\replacetex";
+		if (DirectoryExists(modRepTexDir))
+			ScanTextureReplaceFolder(modRepTexDir, i);
 
 		// Check if a custom EXE is required.
 		if (modinfo->hasKeyNonEmpty("EXEFile"))
@@ -1694,89 +1798,137 @@ static void __cdecl InitMods()
 		if (modinfo->hasKeyNonEmpty("DLLFile"))
 		{
 			// Prepend the mod directory.
-			// TODO: SetDllDirectory().
+			// TODO: SetDllDirectory()?
 			wstring dll_filename = mod_dir + L'\\' + modinfo->getWString("DLLFile");
 			HMODULE module = LoadLibrary(dll_filename.c_str());
+
 			if (module == nullptr)
 			{
 				DWORD error = GetLastError();
-				LPSTR buffer;
-				size_t size = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-					nullptr, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&buffer, 0, nullptr);
+				LPWSTR buffer;
+				size_t size = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+					nullptr, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL), (LPWSTR)&buffer, 0, nullptr);
+				bool allocated = (size != 0);
 
-				string message(buffer, size);
-				LocalFree(buffer);
+				if (!allocated)
+				{
+					static const wchar_t fmterr[] = L"Unable to format error message.";
+					buffer = const_cast<LPWSTR>(fmterr);
+					size = LengthOfArray(fmterr) - 1;
+				}
+				wstring message(buffer, size);
+				if (allocated)
+					LocalFree(buffer);
 
 				const string dll_filenameA = UTF16toMBS(dll_filename, CP_ACP);
-				PrintDebug("Failed loading mod DLL \"%s\": %s\n", dll_filenameA.c_str(), message.c_str());
-				errors.emplace_back(mod_nameA, "DLL error - " + message);
+				const string messageA = UTF16toMBS(message, CP_ACP);
+				PrintDebug("Failed loading mod DLL \"%s\": %s\n", dll_filenameA.c_str(), messageA.c_str());
+				errors.emplace_back(mod_name, L"DLL error - " + message);
 			}
 			else
 			{
-				const ModInfo *info = (const ModInfo *)GetProcAddress(module, "SADXModInfo");
+				const auto info = (const ModInfo*)GetProcAddress(module, "SADXModInfo");
 				if (info)
 				{
+					modinf.DLLHandle = module;
 					if (info->Patches)
 					{
 						for (int j = 0; j < info->PatchCount; j++)
 							WriteData(info->Patches[j].address, info->Patches[j].data, info->Patches[j].datasize);
 					}
+
 					if (info->Jumps)
 					{
 						for (int j = 0; j < info->JumpCount; j++)
 							WriteJump(info->Jumps[j].address, info->Jumps[j].data);
 					}
+
 					if (info->Calls)
 					{
 						for (int j = 0; j < info->CallCount; j++)
 							WriteCall(info->Calls[j].address, info->Calls[j].data);
 					}
+
 					if (info->Pointers)
 					{
 						for (int j = 0; j < info->PointerCount; j++)
-							WriteData((void **)info->Pointers[j].address, info->Pointers[j].data);
+							WriteData((void**)info->Pointers[j].address, info->Pointers[j].data);
 					}
+
 					if (info->Init)
 					{
 						// TODO: Convert to Unicode later. (Will require an API bump.)
 						initfuncs.emplace_back(info->Init, mod_dirA);
 					}
-					const ModInitFunc init = (const ModInitFunc)GetProcAddress(module, "Init");
-					if (init)
-						initfuncs.emplace_back(init, mod_dirA);
-					const PatchList *patches = (const PatchList *)GetProcAddress(module, "Patches");
-					if (patches)
-						for (int j = 0; j < patches->Count; j++)
-							WriteData(patches->Patches[j].address, patches->Patches[j].data, patches->Patches[j].datasize);
-					const PointerList *jumps = (const PointerList *)GetProcAddress(module, "Jumps");
-					if (jumps)
-						for (int j = 0; j < jumps->Count; j++)
-							WriteJump(jumps->Pointers[j].address, jumps->Pointers[j].data);
-					const PointerList *calls = (const PointerList *)GetProcAddress(module, "Calls");
-					if (calls)
-						for (int j = 0; j < calls->Count; j++)
-							WriteCall(calls->Pointers[j].address, calls->Pointers[j].data);
-					const PointerList *pointers = (const PointerList *)GetProcAddress(module, "Pointers");
-					if (pointers)
-						for (int j = 0; j < pointers->Count; j++)
-							WriteData((void **)pointers->Pointers[j].address, pointers->Pointers[j].data);
 
+					const auto init = (const ModInitFunc)GetProcAddress(module, "Init");
+
+					if (init)
+					{
+						initfuncs.emplace_back(init, mod_dirA);
+					}
+
+					const auto* const patches = (const PatchList*)GetProcAddress(module, "Patches");
+
+					if (patches)
+					{
+						for (int j = 0; j < patches->Count; j++)
+						{
+							WriteData(patches->Patches[j].address, patches->Patches[j].data, patches->Patches[j].datasize);
+						}
+					}
+
+					const auto* const jumps = (const PointerList*)GetProcAddress(module, "Jumps");
+
+					if (jumps)
+					{
+						for (int j = 0; j < jumps->Count; j++)
+						{
+							WriteJump(jumps->Pointers[j].address, jumps->Pointers[j].data);
+						}
+					}
+
+					const auto* const calls = (const PointerList*)GetProcAddress(module, "Calls");
+
+					if (calls)
+					{
+						for (int j = 0; j < calls->Count; j++)
+						{
+							WriteCall(calls->Pointers[j].address, calls->Pointers[j].data);
+						}
+					}
+
+					const auto* const pointers = (const PointerList*)GetProcAddress(module, "Pointers");
+
+					if (pointers)
+					{
+						for (int j = 0; j < pointers->Count; j++)
+						{
+							WriteData((void**)pointers->Pointers[j].address, pointers->Pointers[j].data);
+						}
+					}
+
+					RegisterEvent(modInitEndEvents, module, "OnInitEnd");
 					RegisterEvent(modFrameEvents, module, "OnFrame");
 					RegisterEvent(modInputEvents, module, "OnInput");
 					RegisterEvent(modControlEvents, module, "OnControl");
 					RegisterEvent(modExitEvents, module, "OnExit");
 					RegisterEvent(modRenderDeviceLost, module, "OnRenderDeviceLost");
 					RegisterEvent(modRenderDeviceReset, module, "OnRenderDeviceReset");
+					RegisterEvent(onRenderSceneEnd, module, "OnRenderSceneEnd");
+					RegisterEvent(onRenderSceneStart, module, "OnRenderSceneStart");
 
 					auto customTextureLoad = reinterpret_cast<TextureLoadEvent>(GetProcAddress(module, "OnCustomTextureLoad"));
 					if (customTextureLoad != nullptr)
+					{
 						modCustomTextureLoadEvents.push_back(customTextureLoad);
+					}
 				}
 				else
 				{
 					const string dll_filenameA = UTF16toMBS(dll_filename, CP_ACP);
 					PrintDebug("File \"%s\" is not a valid mod file.\n", dll_filenameA.c_str());
-					errors.emplace_back(mod_nameA, "Not a valid mod file.");
+					errors.emplace_back(mod_name, L"Not a valid mod file.");
 				}
 			}
 		}
@@ -1802,25 +1954,53 @@ static void __cdecl InitMods()
 			}
 		}
 
-		if (modinfo->getBool("RedirectMainSave"))
+		if (modinfo->getBool("RedirectMainSave")) {
 			_mainsavepath = mod_dirA + "\\SAVEDATA";
 
-		if (modinfo->getBool("RedirectChaoSave"))
+			if (!IsPathExist(_mainsavepath))
+			{
+				_mkdir(_mainsavepath.c_str());
+			}
+			use_redirection = true;
+		}
+
+		if (modinfo->getBool("RedirectChaoSave")) {
+
 			_chaosavepath = mod_dirA + "\\SAVEDATA";
+
+			if (!IsPathExist(_chaosavepath))
+			{
+				_mkdir(_chaosavepath.c_str());
+			}
+			use_redirection = true;
+		}
 
 		if (modinfo->hasKeyNonEmpty("WindowTitle"))
 			windowtitle = modinfo->getString("WindowTitle");
+
+		if (modinfo->hasKeyNonEmpty("BorderImage"))
+			borderimg = mod_dir + L'\\' + modinfo->getWString("BorderImage");
+		modlist.push_back(modinf);
 	}
+
+	if (loaderSettings.InputMod)
+		SDL2_Init();
 
 	if (!errors.empty())
 	{
-		std::stringstream message;
-		message << "The following mods didn't load correctly:" << std::endl;
+		std::wstringstream message;
+		message << L"The following mods didn't load correctly:" << std::endl;
 
 		for (auto& i : errors)
+		{
 			message << std::endl << i.first << ": " << i.second;
+		}
 
-		MessageBoxA(nullptr, message.str().c_str(), "Mods failed to load", MB_OK | MB_ICONERROR);
+		MessageBox(nullptr, message.str().c_str(), L"Mods failed to load", MB_OK | MB_ICONERROR);
+
+		// Clear the errors vector to free memory.
+		errors.clear();
+		errors.shrink_to_fit();
 	}
 
 	// Replace filenames. ("ReplaceFiles")
@@ -1836,142 +2016,188 @@ static void __cdecl InitMods()
 	for (auto& initfunc : initfuncs)
 		initfunc.first(initfunc.second.c_str(), helperFunctions);
 
+	ProcessTestSpawn(helperFunctions);
+
 	for (const auto& i : StartPositions)
 	{
 		auto poslist = &i.second;
-		StartPosition *newlist = new StartPosition[poslist->size() + 1];
-		StartPosition *cur = newlist;
+		auto newlist = new StartPosition[poslist->size() + 1];
+		StartPosition* cur = newlist;
+
 		for (const auto& j : *poslist)
+		{
 			*cur++ = j.second;
+		}
+
 		cur->LevelID = LevelIDs_Invalid;
 		switch (i.first)
 		{
 		default:
 		case Characters_Sonic:
-			WriteData((StartPosition **)0x41491E, newlist);
+			WriteData((StartPosition**)0x41491E, newlist);
 			break;
 		case Characters_Tails:
-			WriteData((StartPosition **)0x414925, newlist);
+			WriteData((StartPosition**)0x414925, newlist);
 			break;
 		case Characters_Knuckles:
-			WriteData((StartPosition **)0x41492C, newlist);
+			WriteData((StartPosition**)0x41492C, newlist);
 			break;
 		case Characters_Amy:
-			WriteData((StartPosition **)0x41493A, newlist);
+			WriteData((StartPosition**)0x41493A, newlist);
 			break;
 		case Characters_Gamma:
-			WriteData((StartPosition **)0x414941, newlist);
+			WriteData((StartPosition**)0x414941, newlist);
 			break;
 		case Characters_Big:
-			WriteData((StartPosition **)0x414933, newlist);
+			WriteData((StartPosition**)0x414933, newlist);
 			break;
 		}
 	}
+	StartPositions.clear();
 
 	for (const auto& i : FieldStartPositions)
 	{
 		auto poslist = &i.second;
-		FieldStartPosition *newlist = new FieldStartPosition[poslist->size() + 1];
-		FieldStartPosition *cur = newlist;
+		auto newlist = new FieldStartPosition[poslist->size() + 1];
+		FieldStartPosition* cur = newlist;
+
 		for (const auto& j : *poslist)
+		{
 			*cur++ = j.second;
+		}
+
 		cur->LevelID = LevelIDs_Invalid;
 		StartPosList_FieldReturn[i.first] = newlist;
 	}
+	FieldStartPositions.clear();
 
 	if (PathsInitialized)
 	{
-		PathDataPtr *newlist = new PathDataPtr[Paths.size() + 1];
-		PathDataPtr *cur = newlist;
+		auto newlist = new PathDataPtr[Paths.size() + 1];
+		PathDataPtr* cur = newlist;
+
 		for (const auto& path : Paths)
+		{
 			*cur++ = path.second;
+		}
+
 		cur->LevelAct = 0xFFFF;
-		WriteData((PathDataPtr **)0x49C1A1, newlist);
-		WriteData((PathDataPtr **)0x49C1AF, newlist);
+		WriteData((PathDataPtr**)0x49C1A1, newlist);
+		WriteData((PathDataPtr**)0x49C1AF, newlist);
 	}
+	Paths.clear();
 
 	for (const auto& pvm : CharacterPVMs)
 	{
-		const vector<PVMEntry> *pvmlist = &pvm.second;
+		const vector<PVMEntry>* pvmlist = &pvm.second;
 		auto size = pvmlist->size();
-		PVMEntry *newlist = new PVMEntry[size + 1];
+		auto newlist = new PVMEntry[size + 1];
 		memcpy(newlist, pvmlist->data(), sizeof(PVMEntry) * size);
 		newlist[size].TexList = nullptr;
 		CharacterPVMEntries[pvm.first] = newlist;
 	}
+	CharacterPVMs.clear();
 
 	if (CommonObjectPVMsInitialized)
 	{
 		auto size = CommonObjectPVMs.size();
-		PVMEntry *newlist = new PVMEntry[size + 1];
+		auto newlist = new PVMEntry[size + 1];
 		//PVMEntry *cur = newlist;
 		memcpy(newlist, CommonObjectPVMs.data(), sizeof(PVMEntry) * size);
 		newlist[size].TexList = nullptr;
 		TexLists_ObjRegular[0] = newlist;
 		TexLists_ObjRegular[1] = newlist;
 	}
+	CommonObjectPVMs.clear();
 
 	for (const auto& level : _TrialLevels)
 	{
-		const vector<TrialLevelListEntry> *levellist = &level.second;
+		const vector<TrialLevelListEntry>* levellist = &level.second;
 		auto size = levellist->size();
-		TrialLevelListEntry *newlist = new TrialLevelListEntry[size];
+		auto newlist = new TrialLevelListEntry[size];
 		memcpy(newlist, levellist->data(), sizeof(TrialLevelListEntry) * size);
 		TrialLevels[level.first].Levels = newlist;
 		TrialLevels[level.first].Count = size;
 	}
+	_TrialLevels.clear();
 
 	for (const auto& subgame : _TrialSubgames)
 	{
-		const vector<TrialLevelListEntry> *levellist = &subgame.second;
+		const vector<TrialLevelListEntry>* levellist = &subgame.second;
 		auto size = levellist->size();
-		TrialLevelListEntry *newlist = new TrialLevelListEntry[size];
+		auto newlist = new TrialLevelListEntry[size];
 		memcpy(newlist, levellist->data(), sizeof(TrialLevelListEntry) * size);
 		TrialSubgames[subgame.first].Levels = newlist;
 		TrialSubgames[subgame.first].Count = size;
 	}
+	_TrialSubgames.clear();
 
 	if (!_mainsavepath.empty())
 	{
-		char *buf = new char[_mainsavepath.size() + 1];
+		char* buf = new char[_mainsavepath.size() + 1];
 		strncpy(buf, _mainsavepath.c_str(), _mainsavepath.size() + 1);
 		mainsavepath = buf;
-		string tmp = "./" + _mainsavepath + "/%s";
+		string tmp = "./" + _mainsavepath + "/";
+		WriteData((char*)0x42213D, (char)(tmp.size() + 1)); // Write
 		buf = new char[tmp.size() + 1];
 		strncpy(buf, tmp.c_str(), tmp.size() + 1);
-		WriteData((char **)0x421E4E, buf);
-		WriteData((char **)0x421E6A, buf);
-		WriteData((char **)0x421F07, buf);
-		WriteData((char **)0x5050E5, buf);
-		WriteData((char **)0x5051ED, buf);
+		WriteData((char**)0x422020, buf); // Write
+		tmp = "./" + _mainsavepath + "/%s";
+		buf = new char[tmp.size() + 1];
+		strncpy(buf, tmp.c_str(), tmp.size() + 1);
+		WriteData((char**)0x421E4E, buf); // Load
+		WriteData((char**)0x421E6A, buf); // Load
+		WriteData((char**)0x421F07, buf); // Delete
+		WriteData((char**)0x42214E, buf); // Write
+		WriteData((char**)0x5050E5, buf); // Count
+		WriteData((char**)0x5051ED, buf); // Count
+		tmp = "./" + _mainsavepath + "/SonicDX%02d.snc";
+		WriteData((char*)0x422064, (char)(tmp.size() - 1)); // Write
+		buf = new char[tmp.size() + 1];
+		strncpy(buf, tmp.c_str(), tmp.size() + 1);
+		WriteData((char**)0x42210F, buf); // Write
 		tmp = "./" + _mainsavepath + "/SonicDX??.snc";
 		buf = new char[tmp.size() + 1];
 		strncpy(buf, tmp.c_str(), tmp.size() + 1);
-		WriteData((char **)0x5050AB, buf);
-		WriteJump(WriteSaveFile, WriteSaveFile_r);
+		WriteData((char**)0x5050AB, buf); // Count
 	}
 
 	if (!_chaosavepath.empty())
 	{
-		char *buf = new char[_chaosavepath.size() + 1];
+		char* buf = new char[_chaosavepath.size() + 1];
 		strncpy(buf, _chaosavepath.c_str(), _chaosavepath.size() + 1);
 		chaosavepath = buf;
 		string tmp = "./" + _chaosavepath + "/SONICADVENTURE_DX_CHAOGARDEN.snc";
 		buf = new char[tmp.size() + 1];
 		strncpy(buf, tmp.c_str(), tmp.size() + 1);
-		WriteData((char **)0x7163EF, buf);
-		WriteData((char **)0x71AA6F, buf);
-		WriteData((char **)0x71ACDB, buf);
-		WriteData((char **)0x71ADC5, buf);
+		WriteData((char**)0x7163EF, buf); // ALMC_Read
+		WriteData((char**)0x71AA6F, buf); // al_confirmsave
+		WriteData((char**)0x71ACDB, buf); // al_confirmload
+		WriteData((char**)0x71ADC5, buf); // al_confirmload
 	}
 
 	if (!windowtitle.empty())
 	{
-		char *buf = new char[windowtitle.size() + 1];
+		char* buf = new char[windowtitle.size() + 1];
 		strncpy(buf, windowtitle.c_str(), windowtitle.size() + 1);
 		*(char**)0x892944 = buf;
 	}
 
+	if (!_MusicList.empty())
+	{
+		auto size = _MusicList.size();
+		auto newlist = new MusicInfo[size];
+		memcpy(newlist, _MusicList.data(), sizeof(MusicInfo) * size);
+		WriteData((const char***)0x425424, &newlist->Name);
+		WriteData((int**)0x425442, &newlist->Loop);
+		WriteData((const char***)0x425460, &newlist->Name);
+		WriteData((int**)0x42547E, &newlist->Loop);
+	}
+	_MusicList.clear();
+
+	ProcessVoiceDurationRegisters();
+
+	RaiseEvents(modInitEndEvents);
 	PrintDebug("Finished loading mods\n");
 
 	// Check for patches.
@@ -2015,13 +2241,16 @@ static void __cdecl InitMods()
 		patches_str.close();
 	}
 
+
 	// Check for codes.
 	ifstream codes_str("mods\\Codes.dat", ifstream::binary);
+
 	if (codes_str.is_open())
 	{
 		static const char codemagic[6] = { 'c', 'o', 'd', 'e', 'v', '5' };
 		char buf[sizeof(codemagic)];
 		codes_str.read(buf, sizeof(buf));
+
 		if (!memcmp(buf, codemagic, sizeof(codemagic)))
 		{
 			int codecount_header;
@@ -2029,6 +2258,7 @@ static void __cdecl InitMods()
 			PrintDebug("Loading %d codes...\n", codecount_header);
 			codes_str.seekg(0);
 			int codecount = codeParser.readCodes(codes_str);
+
 			if (codecount >= 0)
 			{
 				PrintDebug("Loaded %d codes.\n", codecount);
@@ -2052,6 +2282,7 @@ static void __cdecl InitMods()
 		{
 			PrintDebug("Code file is not in the correct format.\n");
 		}
+
 		codes_str.close();
 	}
 
@@ -2061,10 +2292,20 @@ static void __cdecl InitMods()
 	WriteJump((void*)0x0042F1C5, (void*)OnInput_MidJump);	// Cutscene stuff - Untested. Couldn't trigger ingame.
 	WriteJump((void*)0x0042F1E9, (void*)OnInput);			// Cutscene stuff
 	WriteJump((void*)0x0040FF00, (void*)OnControl);
+
+	// Remove "Tails Adventure" gray filter
+	WriteData(reinterpret_cast<float*>(0x87CBA8), 0.0f);
+	WriteData(reinterpret_cast<float*>(0x87CBAC), 0.0f);
+
+	ApplyTestSpawn();
+	GVR_Init();
+	if (loaderSettings.ExtendedSaveSupport)
+		ExtendedSaveSupport_Init();
 }
 
 DataPointer(HMODULE, chrmodelshandle, 0x3AB9170);
-static void __cdecl LoadChrmodels(void)
+
+static void __cdecl LoadChrmodels()
 {
 	chrmodelshandle = LoadLibrary(L".\\system\\CHRMODELS_orig.dll");
 	if (!chrmodelshandle)
@@ -2074,8 +2315,12 @@ static void __cdecl LoadChrmodels(void)
 			L"SADX Mod Loader", MB_ICONERROR);
 		ExitProcess(1);
 	}
-	SetChrmodelsDLLHandle(chrmodelshandle);
-	WriteCall((void *)0x402513, (void *)InitMods);
+	SetDLLHandle(L"CHRMODELS", chrmodelshandle);
+	SetDLLHandle(L"CHRMODELS_orig", chrmodelshandle);
+	SetDLLHandle(L"CHAOSTGGARDEN02MR_DAYTIME", LoadLibrary(L".\\system\\CHAOSTGGARDEN02MR_DAYTIME.DLL"));
+	SetDLLHandle(L"CHAOSTGGARDEN02MR_EVENING", LoadLibrary(L".\\system\\CHAOSTGGARDEN02MR_EVENING.DLL"));
+	SetDLLHandle(L"CHAOSTGGARDEN02MR_NIGHT", LoadLibrary(L".\\system\\CHAOSTGGARDEN02MR_NIGHT.DLL"));
+	WriteCall((void*)0x402513, (void*)InitMods);
 }
 
 /**
@@ -2104,7 +2349,7 @@ BOOL APIENTRY DllMain(HINSTANCE hinstDll, DWORD fdwReason, LPVOID lpvReserved)
 		}
 
 		WriteData((unsigned char*)0x401AE1, (unsigned char)0x90);
-		WriteCall((void *)0x401AE2, (void *)LoadChrmodels);
+		WriteCall((void*)0x401AE2, (void*)LoadChrmodels);
 
 #if !defined(_MSC_VER) || defined(_DLL)
 		// Disable thread library calls, since we don't
