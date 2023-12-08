@@ -3,7 +3,7 @@ DataArray(NJS_TEXLIST, SSArua02, 0x014221A0, 8); //0x120
 DataArray(NJS_TEXLIST, SSSplash, 0x014221E0, 8); //0x180
 DataArray(NJS_TEXLIST, SSHoming, 0x01422228, 49); //0x24C
 
-NJS_TEXNAME SUPERSONIC_DCTexName[] = {
+NJS_TEXNAME HYPERSONICTexName[] = {
 	{ (void*)"s_anakage1" },
 	{ (void*)"s_hando2" },
 	{ (void*)"s_testhand" },
@@ -102,89 +102,89 @@ NJS_TEXNAME SUPERSONIC_DCTexName[] = {
 	{ (void*)"15"}
 };
 
-NJS_TEXLIST SS_PVM = { arrayptrandlength(SUPERSONIC_DCTexName) };
+NJS_TEXLIST HS_PVM = { arrayptrandlength(HYPERSONICTexName) };
 
 NJS_TEXLIST SSAura01[] = {
-	{ &SUPERSONIC_DCTexName[16], 1 },
-	{ &SUPERSONIC_DCTexName[17], 1 },
-	{ &SUPERSONIC_DCTexName[18], 1 },
-	{ &SUPERSONIC_DCTexName[19], 1 },
-	{ &SUPERSONIC_DCTexName[20], 1 },
-	{ &SUPERSONIC_DCTexName[21], 1 },
-	{ &SUPERSONIC_DCTexName[22], 1 },
-	{ &SUPERSONIC_DCTexName[23], 1 }
+	{ &HYPERSONICTexName[16], 1 },
+	{ &HYPERSONICTexName[17], 1 },
+	{ &HYPERSONICTexName[18], 1 },
+	{ &HYPERSONICTexName[19], 1 },
+	{ &HYPERSONICTexName[20], 1 },
+	{ &HYPERSONICTexName[21], 1 },
+	{ &HYPERSONICTexName[22], 1 },
+	{ &HYPERSONICTexName[23], 1 }
 };
 
 NJS_TEXLIST SSAura02[] = {
-	{ &SUPERSONIC_DCTexName[24], 1 },
-	{ &SUPERSONIC_DCTexName[25], 1 },
-	{ &SUPERSONIC_DCTexName[26], 1 },
-	{ &SUPERSONIC_DCTexName[27], 1 },
-	{ &SUPERSONIC_DCTexName[28], 1 },
-	{ &SUPERSONIC_DCTexName[29], 1 },
-	{ &SUPERSONIC_DCTexName[30], 1 },
-	{ &SUPERSONIC_DCTexName[31], 1 }
+	{ &HYPERSONICTexName[24], 1 },
+	{ &HYPERSONICTexName[25], 1 },
+	{ &HYPERSONICTexName[26], 1 },
+	{ &HYPERSONICTexName[27], 1 },
+	{ &HYPERSONICTexName[28], 1 },
+	{ &HYPERSONICTexName[29], 1 },
+	{ &HYPERSONICTexName[30], 1 },
+	{ &HYPERSONICTexName[31], 1 }
 };
 
 NJS_TEXLIST SSWaterThing[] = {
-	{ &SUPERSONIC_DCTexName[32], 2 },
-	{ &SUPERSONIC_DCTexName[34], 2 },
-	{ &SUPERSONIC_DCTexName[36], 2 },
-	{ &SUPERSONIC_DCTexName[38], 2 },
-	{ &SUPERSONIC_DCTexName[40], 2 },
-	{ &SUPERSONIC_DCTexName[42], 2 },
-	{ &SUPERSONIC_DCTexName[44], 2 },
-	{ &SUPERSONIC_DCTexName[46], 2 }
+	{ &HYPERSONICTexName[32], 2 },
+	{ &HYPERSONICTexName[34], 2 },
+	{ &HYPERSONICTexName[36], 2 },
+	{ &HYPERSONICTexName[38], 2 },
+	{ &HYPERSONICTexName[40], 2 },
+	{ &HYPERSONICTexName[42], 2 },
+	{ &HYPERSONICTexName[44], 2 },
+	{ &HYPERSONICTexName[46], 2 }
 };
 
 NJS_TEXLIST SSHomingTex1[] = {
-	{ &SUPERSONIC_DCTexName[48], 1 }
+	{ &HYPERSONICTexName[48], 1 }
 };
 
 NJS_TEXLIST SSHomingTex2[] = {
-	{ &SUPERSONIC_DCTexName[49], 1 },
-	{ &SUPERSONIC_DCTexName[50], 1 },
-	{ &SUPERSONIC_DCTexName[51], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[52], 1 },
-	{ &SUPERSONIC_DCTexName[53], 1 },
-	{ &SUPERSONIC_DCTexName[54], 1 },
-	{ &SUPERSONIC_DCTexName[55], 1 },
-	{ &SUPERSONIC_DCTexName[56], 1 },
-	{ &SUPERSONIC_DCTexName[57], 1 },
-	{ &SUPERSONIC_DCTexName[58], 1 },
-	{ &SUPERSONIC_DCTexName[59], 1 },
-	{ &SUPERSONIC_DCTexName[60], 1 }
+	{ &HYPERSONICTexName[49], 1 },
+	{ &HYPERSONICTexName[50], 1 },
+	{ &HYPERSONICTexName[51], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[52], 1 },
+	{ &HYPERSONICTexName[53], 1 },
+	{ &HYPERSONICTexName[54], 1 },
+	{ &HYPERSONICTexName[55], 1 },
+	{ &HYPERSONICTexName[56], 1 },
+	{ &HYPERSONICTexName[57], 1 },
+	{ &HYPERSONICTexName[58], 1 },
+	{ &HYPERSONICTexName[59], 1 },
+	{ &HYPERSONICTexName[60], 1 }
 };
 
 NJS_TEXLIST SSHomingTex3[] = {
-	{ &SUPERSONIC_DCTexName[61], 1 },
-	{ &SUPERSONIC_DCTexName[50], 1 },
-	{ &SUPERSONIC_DCTexName[62], 1 },
-	{ &SUPERSONIC_DCTexName[63], 1 },
-	{ &SUPERSONIC_DCTexName[63], 1 },
-	{ &SUPERSONIC_DCTexName[63], 1 },
-	{ &SUPERSONIC_DCTexName[63], 1 },
-	{ &SUPERSONIC_DCTexName[63], 1 },
-	{ &SUPERSONIC_DCTexName[63], 1 },
-	{ &SUPERSONIC_DCTexName[63], 1 },
-	{ &SUPERSONIC_DCTexName[63], 1 },
-	{ &SUPERSONIC_DCTexName[64], 1 },
-	{ &SUPERSONIC_DCTexName[65], 1 },
-	{ &SUPERSONIC_DCTexName[66], 1 },
-	{ &SUPERSONIC_DCTexName[67], 1 },
-	{ &SUPERSONIC_DCTexName[68], 1 },
-	{ &SUPERSONIC_DCTexName[69], 1 },
-	{ &SUPERSONIC_DCTexName[70], 1 },
-	{ &SUPERSONIC_DCTexName[71], 1 },
-	{ &SUPERSONIC_DCTexName[72], 1 }
+	{ &HYPERSONICTexName[61], 1 },
+	{ &HYPERSONICTexName[50], 1 },
+	{ &HYPERSONICTexName[62], 1 },
+	{ &HYPERSONICTexName[63], 1 },
+	{ &HYPERSONICTexName[63], 1 },
+	{ &HYPERSONICTexName[63], 1 },
+	{ &HYPERSONICTexName[63], 1 },
+	{ &HYPERSONICTexName[63], 1 },
+	{ &HYPERSONICTexName[63], 1 },
+	{ &HYPERSONICTexName[63], 1 },
+	{ &HYPERSONICTexName[63], 1 },
+	{ &HYPERSONICTexName[64], 1 },
+	{ &HYPERSONICTexName[65], 1 },
+	{ &HYPERSONICTexName[66], 1 },
+	{ &HYPERSONICTexName[67], 1 },
+	{ &HYPERSONICTexName[68], 1 },
+	{ &HYPERSONICTexName[69], 1 },
+	{ &HYPERSONICTexName[70], 1 },
+	{ &HYPERSONICTexName[71], 1 },
+	{ &HYPERSONICTexName[72], 1 }
 };
 
 NJS_MATERIAL matlist_8D6D5997198645A8A53[] = {
