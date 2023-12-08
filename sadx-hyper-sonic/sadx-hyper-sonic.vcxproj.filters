@@ -53,9 +53,6 @@
     <ClCompile Include="audio.cpp">
       <Filter>Archivos de origen</Filter>
     </ClCompile>
-    <ClCompile Include="Mod.cpp">
-      <Filter>Archivos de origen</Filter>
-    </ClCompile>
     <ClCompile Include="Util.cpp">
       <Filter>Archivos de origen</Filter>
     </ClCompile>
