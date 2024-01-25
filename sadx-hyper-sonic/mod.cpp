@@ -70,21 +70,21 @@ void __cdecl Sonic_Act1_r(EntityData1* data, EntityData2* data2, CharObj2* co2) 
 	else {
 		if (data->Status & Status_DoNextAction && data->NextAction == 46)
 		{
-			njReleaseTexture(&Hypersonic_TEXLIST);
-			njReleaseTexture(&Hypersonicdc_TEXLIST);
+			njReleaseTexture(&HyperSonic_TEXLIST);
+			njReleaseTexture(&HyperSonicDC_TEXLIST);
 			if (CountEmblems(&SaveFile) >= 130 && (Rings >=100 || LastStoryFlag ==1))
 			{
 				HyperSonic[id] = true;
 
 				if (DCChars == true)
 				{
-					helperFunctionsGlobal.RegisterCharacterPVM(Characters_Sonic, { "HYPERSONIC_DC", &Hypersonicdc_TEXLIST });
-					LoadPVM("HYPERSONIC_DC", &Hypersonicdc_TEXLIST);
+					helperFunctionsGlobal.RegisterCharacterPVM(Characters_Sonic, { "HYPERSONIC_DC", &HyperSonicDC_TEXLIST });
+					LoadPVM("HYPERSONIC_DC", &HyperSonicDC_TEXLIST);
 				}
 				else
 				{
-					helperFunctionsGlobal.RegisterCharacterPVM(Characters_Sonic, { "HYPERSONIC", &Hypersonic_TEXLIST });
-					LoadPVM("HYPERSONIC", &Hypersonic_TEXLIST);
+					helperFunctionsGlobal.RegisterCharacterPVM(Characters_Sonic, { "HYPERSONIC", &HyperSonic_TEXLIST });
+					LoadPVM("HYPERSONIC", &HyperSonic_TEXLIST);
 				}
 
 				InvincibilityObject[id] = LoadObject(LoadObj_Data1, 2, Invincibility_Load);
@@ -123,7 +123,7 @@ extern "C"
 		WriteData((NJS_TEXLIST**)0x55F2BE, SSHomingTex2);
 		WriteData((NJS_TEXLIST**)0x55F677, SSHomingTex2);
 		WriteData((NJS_TEXLIST**)0x55F669, SSHomingTex3);
-		SUPERSONIC_TEXLIST = SS_PVM;
+		SUPERSONIC_TEXLIST = HS_PVM;
 	}
 	
 	void __declspec(dllexport) OnInitEnd(const char* path, HelperFunctions* helper)
